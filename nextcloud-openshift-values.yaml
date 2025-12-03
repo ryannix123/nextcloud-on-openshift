@@ -1,0 +1,425 @@
+# Nextcloud Helm Chart - OpenShift Restricted SCC Compatible Values
+# For use with: helm install nextcloud nextcloud/nextcloud -f nextcloud-openshift-values.yaml
+#
+# Key adaptations for OpenShift restricted SCC:
+# - No hardcoded UIDs (OpenShift assigns from namespace range)
+# - Drop required capabilities 
+# - Non-privileged ports (8080 instead of 80)
+# - Proper securityContext configuration
+# - allowPrivilegeEscalation: false
+
+# Use the FPM image with nginx sidecar - more OpenShift friendly
+image:
+  repository: nextcloud
+  flavor: fpm-alpine  # Alpine FPM is lighter and more container-friendly
+  pullPolicy: IfNotPresent
+
+# Nextcloud application configuration
+nextcloud:
+  host: nextcloud.apps.example.com  # Change to your OpenShift route hostname
+  username: admin
+  password: ""  # Set via --set or use existingSecret
+  # existingSecret:
+  #   enabled: true
+  #   secretName: nextcloud-admin
+  #   usernameKey: username
+  #   passwordKey: password
+  
+  # Container port - using non-privileged port
+  containerPort: 9000  # FPM default port
+
+  # Pod-level security context (applies to all containers)
+  podSecurityContext:
+    # Don't set runAsUser - let OpenShift assign from namespace range
+    # Don't set fsGroup - let OpenShift assign from namespace range
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Container-level security context for Nextcloud container
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false  # Nextcloud needs to write to various dirs
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Persistence subpath configuration
+  persistence:
+    subPath: ""  # Can be set if using shared PV
+
+  # Extra environment variables for OpenShift compatibility
+  extraEnv:
+    # Override Apache port if using Apache image
+    - name: APACHE_DISABLE_REWRITE_IP
+      value: "1"
+    # Trust the OpenShift router proxy
+    - name: TRUSTED_PROXIES
+      value: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+    - name: OVERWRITEPROTOCOL
+      value: "https"
+
+  # PHP configuration optimizations
+  phpConfigs:
+    www.conf: |-
+      [www]
+      user = www-data
+      group = www-data
+      listen = 127.0.0.1:9000
+      pm = dynamic
+      pm.max_children = 50
+      pm.start_servers = 5
+      pm.min_spare_servers = 5
+      pm.max_spare_servers = 35
+      pm.max_requests = 500
+
+  # Default configs to enable
+  defaultConfigs:
+    .htaccess: true
+    apache-pretty-urls.config.php: true
+    apcu.config.php: true
+    apps.config.php: true
+    autoconfig.php: true
+    redis.config.php: true
+    smtp.config.php: true
+
+  # Custom Nextcloud configs
+  configs:
+    proxy.config.php: |-
+      <?php
+      $CONFIG = array (
+        'trusted_proxies' => ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
+        'overwriteprotocol' => 'https',
+        'overwrite.cli.url' => 'https://nextcloud.apps.example.com',
+      );
+
+# Enable nginx sidecar for serving static content
+nginx:
+  enabled: true
+  image:
+    repository: nginx
+    tag: alpine
+    pullPolicy: IfNotPresent
+  
+  # Nginx container security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+  
+  # Use non-privileged port
+  containerPort: 8080
+
+  # Custom nginx config for non-privileged port
+  config:
+    default: false
+    custom: |-
+      worker_processes auto;
+      pid /tmp/nginx.pid;
+      error_log /var/log/nginx/error.log warn;
+      
+      events {
+          worker_connections 1024;
+      }
+      
+      http {
+          include /etc/nginx/mime.types;
+          default_type application/octet-stream;
+          
+          # Use /tmp for temp files (writable in restricted SCC)
+          client_body_temp_path /tmp/client_temp;
+          proxy_temp_path /tmp/proxy_temp;
+          fastcgi_temp_path /tmp/fastcgi_temp;
+          uwsgi_temp_path /tmp/uwsgi_temp;
+          scgi_temp_path /tmp/scgi_temp;
+          
+          log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+          
+          access_log /var/log/nginx/access.log main;
+          
+          sendfile on;
+          keepalive_timeout 65;
+          client_max_body_size 10G;
+          
+          upstream php-handler {
+              server 127.0.0.1:9000;
+          }
+          
+          server {
+              listen 8080;
+              server_name _;
+              
+              root /var/www/html;
+              index index.php index.html;
+              
+              # Security headers
+              add_header Referrer-Policy "no-referrer" always;
+              add_header X-Content-Type-Options "nosniff" always;
+              add_header X-Frame-Options "SAMEORIGIN" always;
+              add_header X-Permitted-Cross-Domain-Policies "none" always;
+              add_header X-Robots-Tag "noindex, nofollow" always;
+              add_header X-XSS-Protection "1; mode=block" always;
+              
+              # Remove X-Powered-By
+              fastcgi_hide_header X-Powered-By;
+              
+              location = /robots.txt {
+                  allow all;
+                  log_not_found off;
+                  access_log off;
+              }
+              
+              location ^~ /.well-known {
+                  location = /.well-known/carddav { return 301 /remote.php/dav/; }
+                  location = /.well-known/caldav { return 301 /remote.php/dav/; }
+                  location /.well-known/acme-challenge { try_files $uri $uri/ =404; }
+                  location /.well-known/pki-validation { try_files $uri $uri/ =404; }
+                  return 301 /index.php$request_uri;
+              }
+              
+              location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/) { return 404; }
+              location ~ ^/(?:\.|autotest|occ|issue|indie|db_|console) { return 404; }
+              
+              location ~ \.php(?:$|/) {
+                  rewrite ^/(?!index|remote|public|cron|core\/ajax\/update|status|ocs\/v[12]|updater\/.+|oc[ms]-provider\/.+|.+\/richdocumentscode(_arm64)?\/proxy) /index.php$request_uri;
+                  
+                  fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+                  set $path_info $fastcgi_path_info;
+                  
+                  try_files $fastcgi_script_name =404;
+                  
+                  include fastcgi_params;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  fastcgi_param PATH_INFO $path_info;
+                  fastcgi_param HTTPS on;
+                  fastcgi_param modHeadersAvailable true;
+                  fastcgi_param front_controller_active true;
+                  fastcgi_pass php-handler;
+                  
+                  fastcgi_intercept_errors on;
+                  fastcgi_request_buffering off;
+                  
+                  fastcgi_read_timeout 600;
+                  fastcgi_send_timeout 600;
+                  fastcgi_connect_timeout 600;
+              }
+              
+              location ~ \.(?:css|js|mjs|svg|gif|png|jpg|ico|wasm|tflite|map|ogg|flac)$ {
+                  try_files $uri /index.php$request_uri;
+                  add_header Cache-Control "public, max-age=15778463, immutable";
+                  access_log off;
+              }
+              
+              location ~ \.woff2?$ {
+                  try_files $uri /index.php$request_uri;
+                  expires 7d;
+                  access_log off;
+              }
+              
+              location /remote {
+                  return 301 /remote.php$request_uri;
+              }
+              
+              location / {
+                  try_files $uri $uri/ /index.php$request_uri;
+              }
+          }
+      }
+
+# Internal database - PostgreSQL recommended for OpenShift
+internalDatabase:
+  enabled: false
+
+# External database configuration (use this OR enable postgresql below)
+externalDatabase:
+  enabled: true
+  type: postgresql
+  host: nextcloud-postgresql  # Service name if using bundled postgresql
+  port: 5432
+  database: nextcloud
+  user: nextcloud
+  password: ""  # Set via --set or existingSecret
+  # existingSecret:
+  #   enabled: true
+  #   secretName: nextcloud-db
+  #   usernameKey: db-username
+  #   passwordKey: db-password
+
+# Bundled PostgreSQL (Bitnami chart) - OpenShift compatible
+postgresql:
+  enabled: true
+  global:
+    postgresql:
+      auth:
+        username: nextcloud
+        password: ""  # Set via --set
+        database: nextcloud
+  
+  primary:
+    # Pod security context
+    podSecurityContext:
+      enabled: true
+      # Don't set fsGroup - let OpenShift assign
+    
+    # Container security context
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
+    
+    persistence:
+      enabled: true
+      size: 8Gi
+      # storageClass: ""  # Use default or specify OpenShift storage class
+
+# Disable bundled MariaDB
+mariadb:
+  enabled: false
+
+# Redis for caching - highly recommended
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: ""  # Set via --set
+  
+  master:
+    podSecurityContext:
+      enabled: true
+      # Don't set fsGroup
+    
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
+
+  replica:
+    podSecurityContext:
+      enabled: true
+    
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
+
+# Persistence configuration
+persistence:
+  enabled: true
+  # storageClass: ""  # Use default or specify
+  accessMode: ReadWriteOnce
+  size: 50Gi
+  
+  # Separate data volume (recommended)
+  nextcloudData:
+    enabled: true
+    # storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 100Gi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 8080
+  # loadBalancerIP: ""
+
+# OpenShift Route (instead of Ingress)
+ingress:
+  enabled: false  # We'll use OpenShift Route instead
+
+# Liveness and readiness probes
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+  successThreshold: 1
+
+# Resources
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# RBAC
+rbac:
+  enabled: true
+  serviceaccount:
+    create: true
+    name: nextcloud-serviceaccount
+    annotations: {}
+
+# Cron job for background tasks
+cronjob:
+  enabled: true
+  schedule: "*/5 * * * *"
+  annotations: {}
+  failedJobsHistoryLimit: 5
+  successfulJobsHistoryLimit: 2
+  
+  # Security context for cron pod
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+# HPA - disabled by default
+hpa:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+# Metrics/monitoring
+metrics:
+  enabled: false
+  # serviceMonitor:
+  #   enabled: true
