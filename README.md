@@ -259,17 +259,12 @@ Contributions are welcome! Please:
 
 ---
 
-## 📜 License
-
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
-
----
-
 ## 🙏 Acknowledgments
 
 - [Nextcloud](https://nextcloud.com) for the amazing self-hosted cloud platform
 - [Nextcloud Helm Chart](https://github.com/nextcloud/helm) maintainers
 - Red Hat for OpenShift and the Developer Sandbox
+- Claude.ai's Opus 4.5 model for troubleshooting Nextcloud's native Helm deployment on OpenShift
 
 ---
 
