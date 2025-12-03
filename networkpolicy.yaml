@@ -1,0 +1,120 @@
+---
+# NetworkPolicy for Nextcloud on OpenShift
+#
+# These policies restrict network traffic to only what's necessary.
+# Apply with: oc apply -f networkpolicy.yaml
+#
+# Note: Network policies require a CNI that supports them (OpenShift SDN or OVN-Kubernetes)
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-allow-router
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nextcloud
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow traffic from OpenShift router
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-allow-internal
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nextcloud
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow from same namespace (Redis, PostgreSQL)
+    - from:
+        - podSelector: {}
+  egress:
+    # Allow to same namespace (Redis, PostgreSQL)
+    - to:
+        - podSelector: {}
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow external HTTPS (for app store, updates, federation)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-postgresql
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only allow connections from Nextcloud pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nextcloud
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-redis
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only allow connections from Nextcloud pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nextcloud
+      ports:
+        - protocol: TCP
+          port: 6379

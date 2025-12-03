@@ -1,83 +1,92 @@
-# Nextcloud on OpenShift with Restricted SCC
+# 🚀 Nextcloud on OpenShift — Zero Privilege Deployment
 
-This configuration deploys the Nextcloud Helm chart on OpenShift using the **restricted** (or restricted-v2) Security Context Constraint, requiring no elevated privileges.
+[![OpenShift](https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift)](https://www.redhat.com/en/technologies/cloud-computing/openshift)
+[![Nextcloud](https://img.shields.io/badge/Nextcloud-32.x-blue?logo=nextcloud)](https://nextcloud.com)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![SCC](https://img.shields.io/badge/SCC-restricted-brightgreen)](https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html)
 
-## Files Included
+> **Deploy Nextcloud on OpenShift without ANY elevated privileges.** No `anyuid`. No `privileged`. Just pure, security-hardened container goodness.
 
-| File | Description |
-|------|-------------|
-| `nextcloud-openshift-values.yaml` | Helm values override for OpenShift compatibility |
-| `nextcloud-openshift-route.yaml` | OpenShift Route and NetworkPolicy resources |
-| `deploy-nextcloud.sh` | Automated deployment script |
+---
 
-## Key Modifications for OpenShift Restricted SCC
+## 🎯 Why This Matters
 
-### 1. Security Context Changes
+Most Nextcloud deployment guides tell you to grant `anyuid` or `privileged` SCCs. **That's a security anti-pattern.**
 
-The restricted SCC enforces several constraints that the default Nextcloud chart doesn't accommodate:
+This repository provides a **battle-tested configuration** that runs Nextcloud under OpenShift's most restrictive security policy — the same constraints applied to untrusted workloads. Here's what that means:
 
-```yaml
-# Pod-level - let OpenShift assign UIDs
-podSecurityContext:
-  runAsNonRoot: true
-  seccompProfile:
-    type: RuntimeDefault
-  # NO runAsUser or fsGroup - OpenShift assigns from namespace range
+| Security Feature | Status |
+|-----------------|--------|
+| Runs as non-root | ✅ |
+| Random UID from namespace range | ✅ |
+| All capabilities dropped | ✅ |
+| No privilege escalation | ✅ |
+| Seccomp profile enforced | ✅ |
+| Works on Developer Sandbox | ✅ |
 
-# Container-level
-securityContext:
-  allowPrivilegeEscalation: false
-  runAsNonRoot: true
-  capabilities:
-    drop:
-      - ALL
+**The result?** A production-ready Nextcloud that your security team will actually approve.
+
+---
+
+## ✨ Features
+
+- **🔒 Security First** — Runs entirely under `restricted` or `restricted-v2` SCC
+- **☁️ Cloud Native** — Helm-based deployment with proper health checks and resource limits
+- **🏃 Rootless Nginx** — Uses `nginxinc/nginx-unprivileged` for the web tier
+- **📦 Self-Contained** — Single script deployment with auto-configuration
+- **🧪 Sandbox Ready** — Tested on Red Hat Developer Sandbox (free tier!)
+- **🔧 Fully Documented** — Every fix and workaround explained
+
+---
+
+## 📁 Repository Structure
+
+```
+nextcloud-on-openshift/
+├── README.md                        # You're reading it
+├── LICENSE                          # MIT License
+├── deploy-nextcloud-sandbox.sh      # 🌟 One-click deployment for Developer Sandbox
+├── values/
+│   └── openshift-values.yaml        # Helm values for full OpenShift clusters
+└── manifests/
+    ├── route.yaml                   # OpenShift Route with TLS
+    └── networkpolicy.yaml           # Network policies (optional)
 ```
 
-**Why no explicit UIDs?** OpenShift's restricted SCC uses `MustRunAsRange` which assigns UIDs from the namespace's `openshift.io/sa.scc.uid-range` annotation. Hardcoding UID 33 or 82 would cause pod admission failures.
+### Files You Need
 
-### 2. Non-Privileged Ports
+| File | Required | Description |
+|------|----------|-------------|
+| `deploy-nextcloud-sandbox.sh` | ✅ | All-in-one deployment script (recommended) |
+| `values/openshift-values.yaml` | Optional | Standalone Helm values for customization |
+| `manifests/route.yaml` | Optional | If deploying Route separately |
+| `manifests/networkpolicy.yaml` | Optional | For network-isolated environments |
 
-The standard Apache/nginx images bind to port 80, which requires root. This configuration:
+---
 
-- Uses the **FPM-Alpine** image (PHP-FPM on port 9000)
-- Configures nginx sidecar on port **8080**
-- Custom nginx.conf writes temp files to `/tmp` (writable by any user)
+## 🚀 Quick Start
 
-### 3. Image Selection
+### Option 1: Developer Sandbox (Easiest)
 
-```yaml
-image:
-  flavor: fpm-alpine
-nginx:
-  enabled: true
-```
-
-The FPM variant separates PHP processing from web serving, making it easier to configure both to run as non-root.
-
-### 4. File Permissions
-
-OpenShift assigns a random UID, but the container's group membership includes the namespace's fsGroup. The Nextcloud image handles this via group-writable directories.
-
-## Quick Start
-
-### Prerequisites
-
-- OpenShift 4.x cluster
-- `oc` CLI logged in with appropriate permissions
-- `helm` v3.x installed
-- Cluster storage class configured (for PVCs)
-
-### Automated Deployment
+Perfect for testing or personal use on the [free Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox):
 
 ```bash
-chmod +x deploy-nextcloud.sh
-./deploy-nextcloud.sh <namespace> <hostname>
+# Clone the repo
+git clone https://github.com/YOUR_USERNAME/nextcloud-on-openshift.git
+cd nextcloud-on-openshift
 
-# Example:
-./deploy-nextcloud.sh nextcloud nextcloud.apps.mycluster.example.com
+# Login to your sandbox
+oc login --token=YOUR_TOKEN --server=https://api.sandbox.openshiftapps.com:6443
+
+# Deploy! 🎉
+./deploy-nextcloud-sandbox.sh
 ```
 
-### Manual Deployment
+The script auto-detects your namespace and hostname. Credentials are displayed at the end.
+
+### Option 2: Full OpenShift Cluster
+
+For production or self-managed clusters:
 
 ```bash
 # Create namespace
@@ -87,198 +96,192 @@ oc new-project nextcloud
 helm repo add nextcloud https://nextcloud.github.io/helm/
 helm repo update
 
-# Update hostname in values file
-sed -i 's/nextcloud.apps.example.com/YOUR_HOSTNAME/g' nextcloud-openshift-values.yaml
-
-# Deploy
+# Deploy with custom values
 helm install nextcloud nextcloud/nextcloud \
-    -f nextcloud-openshift-values.yaml \
-    --set nextcloud.password=YourSecurePassword \
-    --set postgresql.global.postgresql.auth.password=DBPassword \
-    --set redis.auth.password=RedisPassword \
-    --namespace nextcloud
+    -f values/openshift-values.yaml \
+    --set nextcloud.host=nextcloud.apps.mycluster.example.com \
+    --set nextcloud.password=$(openssl rand -base64 16) \
+    -n nextcloud
 
 # Create Route
-oc apply -f nextcloud-openshift-route.yaml
+oc apply -f manifests/route.yaml
 ```
 
-## Verification
+---
 
-### Check SCC Assignment
+## 🔧 What's Different About This Configuration?
+
+### The Problem
+
+The official Nextcloud Helm chart assumes you can:
+- Run as a specific UID (33 or 82)
+- Bind to port 80
+- Write to arbitrary filesystem paths
+
+**OpenShift's restricted SCC blocks all of this** — for good reason.
+
+### The Solution
+
+| Challenge | Our Fix |
+|-----------|---------|
+| Fixed UID requirement | Let OpenShift assign from namespace range |
+| Port 80 binding | Use FPM + nginx-unprivileged on port 8080 |
+| Health probes on wrong port | Patch probes to target nginx (8080) |
+| `try_files` causing 403s | Remove `$uri/` directory fallback |
+| Trusted domain errors | Auto-configure via `php occ` |
+| Permission check failures | Disable false-positive check |
+
+Every fix is automated in the deployment script.
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     OpenShift Route                         │
+│                  (TLS termination)                          │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ :443 → :8080
+┌─────────────────────────▼───────────────────────────────────┐
+│                    Nextcloud Pod                            │
+│  ┌─────────────────────┐    ┌─────────────────────────┐    │
+│  │   nginx-unprivileged │    │   nextcloud:fpm-alpine  │    │
+│  │      (port 8080)     │───▶│      (port 9000)        │    │
+│  │   Static files +     │    │   PHP-FPM processing    │    │
+│  │   reverse proxy      │    │                         │    │
+│  └─────────────────────┘    └───────────┬─────────────┘    │
+│                                          │                  │
+│  ┌──────────────────────────────────────▼─────────────────┐│
+│  │              Persistent Volume (RWO)                   ││
+│  │   /var/www/html  /config  /data  /custom_apps          ││
+│  └────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📋 Prerequisites
+
+- **OpenShift 4.x** cluster (or Developer Sandbox)
+- **oc CLI** installed and logged in
+- **Helm 3.x** installed
+- **Storage class** available for PVCs
+
+---
+
+## 🔍 Verification
+
+After deployment, verify you're running with restricted SCC:
 
 ```bash
-# Should show "restricted" or "restricted-v2"
+# Check SCC assignment (should show "restricted" or "restricted-v2")
 oc get pod -l app.kubernetes.io/name=nextcloud \
     -o jsonpath='{.items[*].metadata.annotations.openshift\.io/scc}'
+
+# Verify non-root UID
+oc exec deploy/nextcloud -c nextcloud -- id
+# Output: uid=1000680000(1000680000) gid=0(root) ...
+
+# Test the application
+curl -I https://$(oc get route nextcloud -o jsonpath='{.spec.host}')
 ```
 
-### Check Pod UID
+---
+
+## 🐛 Troubleshooting
+
+### Pod stuck in `CrashLoopBackOff`
 
 ```bash
-oc exec deploy/nextcloud -- id
-# Output should show a high UID like: uid=1000680000 gid=0(root)
+# Check which container is failing
+oc get pods -l app.kubernetes.io/name=nextcloud
+
+# View logs for each container
+oc logs deploy/nextcloud -c nextcloud
+oc logs deploy/nextcloud -c nextcloud-nginx
 ```
 
-### Verify Service Connectivity
+### 403 Forbidden in Browser
+
+Usually a `trusted_domains` issue:
 
 ```bash
-oc exec deploy/nextcloud -- curl -s localhost:8080/status.php
+# Add your hostname to trusted domains
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set \
+    trusted_domains 2 --value="your-hostname.apps.example.com"
 ```
 
-## Troubleshooting
+### Probes Failing (Pod shows 1/2 Ready)
 
-### Pod Stuck in CreateContainerConfigError
-
-Usually indicates SCC violation. Check:
-```bash
-oc describe pod <pod-name>
-oc get events --field-selector reason=FailedCreate
-```
-
-### Permission Denied on PVC
-
-If you see permission errors accessing persistent volumes:
-
-1. Check the fsGroup:
-```bash
-oc get namespace nextcloud -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.supplemental-groups}'
-```
-
-2. Verify PVC access mode matches your storage class capabilities
-
-3. Consider adding an init container to fix permissions (requires anyuid SCC)
-
-### Nginx 403 Forbidden
-
-Often caused by nginx temp directory permissions:
-```bash
-# Check nginx can write to temp
-oc exec deploy/nextcloud -c nginx -- ls -la /tmp/
-```
-
-The custom nginx.conf in values.yaml configures temp paths in `/tmp/`.
-
-### Database Connection Refused
+The Helm chart defaults probes to port 9000, but nginx is on 8080:
 
 ```bash
-# Check PostgreSQL pod
-oc get pods -l app.kubernetes.io/name=postgresql
-oc logs -l app.kubernetes.io/name=postgresql
-
-# Test connectivity
-oc exec deploy/nextcloud -- nc -zv nextcloud-postgresql 5432
+oc patch deploy nextcloud --type='json' -p='[
+  {"op": "replace", "path": "/spec/template/spec/containers/1/readinessProbe/httpGet/port", "value": 8080},
+  {"op": "replace", "path": "/spec/template/spec/containers/1/livenessProbe/httpGet/port", "value": 8080},
+  {"op": "replace", "path": "/spec/template/spec/containers/1/startupProbe/httpGet/port", "value": 8080}
+]'
 ```
 
-## Alternative: Using anyuid SCC
+### "Data directory is readable by other people"
 
-If restricted SCC causes insurmountable issues, you can use anyuid:
+This is a false positive on OpenShift due to random UIDs:
 
 ```bash
-# Create service account
-oc create sa nextcloud-anyuid -n nextcloud
-
-# Grant anyuid SCC
-oc adm policy add-scc-to-user anyuid -z nextcloud-anyuid -n nextcloud
-
-# Deploy with modified values
-helm install nextcloud nextcloud/nextcloud \
-    -f nextcloud-openshift-values.yaml \
-    --set rbac.serviceaccount.create=false \
-    --set rbac.serviceaccount.name=nextcloud-anyuid \
-    --set nextcloud.podSecurityContext.runAsUser=33 \
-    --set nextcloud.podSecurityContext.fsGroup=33 \
-    --namespace nextcloud
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set \
+    check_data_directory_permissions --value="false" --type=boolean
 ```
 
-**Note:** This is less secure and not recommended for production.
+---
 
-## Production Considerations
+## 🚀 Production Recommendations
 
-### 1. External Database
+For production deployments, consider:
 
-For production, use a managed PostgreSQL service or dedicated database cluster:
+1. **External Database** — Use managed PostgreSQL instead of SQLite
+2. **Object Storage** — Configure S3-compatible backend for scalability
+3. **Redis Cache** — Enable Redis for improved performance
+4. **Horizontal Scaling** — Use HPA with shared storage (NFS/S3)
+5. **Backup Strategy** — Implement OADP or Velero for disaster recovery
 
-```yaml
-postgresql:
-  enabled: false
-externalDatabase:
-  enabled: true
-  type: postgresql
-  host: your-postgresql.example.com
-  database: nextcloud
-  existingSecret:
-    enabled: true
-    secretName: nextcloud-db-creds
-```
+---
 
-### 2. Object Storage
+## 🤝 Contributing
 
-For scalable file storage, configure S3-compatible backend:
+Contributions are welcome! Please:
 
-```yaml
-nextcloud:
-  configs:
-    s3.config.php: |-
-      <?php
-      $CONFIG = array (
-        'objectstore' => array(
-          'class' => '\\OC\\Files\\ObjectStore\\S3',
-          'arguments' => array(
-            'bucket' => 'nextcloud',
-            'key' => getenv('S3_KEY'),
-            'secret' => getenv('S3_SECRET'),
-            'hostname' => 's3.example.com',
-            'use_ssl' => true,
-            'use_path_style' => true,
-          ),
-        ),
-      );
-```
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-fix`)
+3. Commit your changes (`git commit -m 'Add amazing fix'`)
+4. Push to the branch (`git push origin feature/amazing-fix`)
+5. Open a Pull Request
 
-### 3. Horizontal Scaling
+---
 
-Enable HPA for auto-scaling (requires shared storage like NFS or S3):
+## 📜 License
 
-```yaml
-hpa:
-  enabled: true
-  minReplicas: 2
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 75
-```
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
-### 4. TLS/Certificates
+---
 
-For custom certificates, modify the Route:
+## 🙏 Acknowledgments
 
-```yaml
-spec:
-  tls:
-    termination: edge
-    certificate: |
-      -----BEGIN CERTIFICATE-----
-      ...
-    key: |
-      -----BEGIN RSA PRIVATE KEY-----
-      ...
-```
+- [Nextcloud](https://nextcloud.com) for the amazing self-hosted cloud platform
+- [Nextcloud Helm Chart](https://github.com/nextcloud/helm) maintainers
+- Red Hat for OpenShift and the Developer Sandbox
 
-## Resource Requests
+---
 
-Adjust based on your workload:
+## 📚 References
 
-```yaml
-resources:
-  requests:
-    cpu: 500m
-    memory: 512Mi
-  limits:
-    cpu: 2000m
-    memory: 2Gi
-```
-
-## References
-
-- [Nextcloud Helm Chart](https://github.com/nextcloud/helm)
+- [Nextcloud Helm Chart Documentation](https://github.com/nextcloud/helm)
 - [OpenShift SCC Documentation](https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html)
 - [Nextcloud Admin Manual](https://docs.nextcloud.com/server/latest/admin_manual/)
+- [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox)
+
+---
+
+<p align="center">
+  <b>⭐ If this saved you hours of debugging, consider giving it a star! ⭐</b>
+</p>
