@@ -1,12 +1,12 @@
 #!/bin/bash
 # Nextcloud Deployment Script for Red Hat Developer Sandbox
-# WITH SCLORG MariaDB + Redis, EFS Storage, and Horizontal Scaling
+# WITH MinIO (S3 Object Storage) + MariaDB + Redis
 #
-# Features:
-# - MariaDB (SCLORG) - OpenShift-native database
-# - Redis (SCLORG) - Session sharing and file locking
-# - EFS storage (RWX) - Enables multiple Nextcloud replicas
-# - Horizontal scaling - Default 2 replicas
+# Architecture:
+# - MinIO: S3-compatible object storage for user files (fast, scalable)
+# - MariaDB: Metadata and user database
+# - Redis: Session handling and file locking
+# - EFS: Shared app code/config (enables multi-replica)
 #
 # Usage: ./deploy-nextcloud-mariadb.sh [hostname] [replicas]
 # Example: ./deploy-nextcloud-mariadb.sh nextcloud-myproject.apps.sandbox.openshiftapps.com 2
@@ -18,7 +18,7 @@ set -euo pipefail
 
 NAMESPACE=$(oc project -q 2>/dev/null || echo "")
 HOSTNAME="${1:-}"
-REPLICAS="${2:-2}"
+REPLICAS="${2:-1}"  # Start with 1, scale after init
 RELEASE_NAME="nextcloud"
 
 # Colors for output
@@ -29,8 +29,14 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  Nextcloud + MariaDB + Redis (Scalable) for OpenShift Sandbox ║${NC}"
+echo -e "${GREEN}║  Nextcloud + MinIO + MariaDB + Redis (Cloud-Native Stack)     ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo -e "${BLUE}Architecture:${NC}"
+echo -e "  • MinIO (S3)  → User file storage (scalable)"
+echo -e "  • MariaDB     → Metadata database"
+echo -e "  • Redis       → Sessions & file locking"
+echo -e "  • gp3 (EBS)   → App code (fast, single replica)"
 echo ""
 
 # Check prerequisites
@@ -51,11 +57,9 @@ echo -e "Current namespace: ${GREEN}${NAMESPACE}${NC}"
 
 # Determine hostname if not provided
 if [ -z "${HOSTNAME}" ]; then
-    # Try to get from existing route first
     HOSTNAME=$(oc get route nextcloud -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
     
     if [ -z "${HOSTNAME}" ]; then
-        # Try to extract apps domain from any existing route
         APPS_DOMAIN=$(oc get routes -A -o jsonpath='{.items[0].spec.host}' 2>/dev/null | sed 's/^[^.]*\.//' || echo "")
         
         if [ -n "${APPS_DOMAIN}" ]; then
@@ -73,25 +77,202 @@ if [ -z "${HOSTNAME}" ]; then
 fi
 
 echo -e "Target hostname: ${GREEN}${HOSTNAME}${NC}"
-echo -e "Nextcloud replicas: ${GREEN}${REPLICAS}${NC}"
+echo -e "Initial replicas: ${GREEN}${REPLICAS}${NC}"
 echo ""
 
 # Generate secure passwords
-echo -e "${YELLOW}Generating secure passwords...${NC}"
+echo -e "${YELLOW}Generating secure credentials...${NC}"
 ADMIN_PASSWORD=$(openssl rand -base64 12 | tr -d '=+/')
 MARIADB_PASSWORD=$(openssl rand -base64 12 | tr -d '=+/')
 MARIADB_ROOT_PASSWORD=$(openssl rand -base64 16 | tr -d '=+/')
 REDIS_PASSWORD=$(openssl rand -base64 12 | tr -d '=+/')
+MINIO_ROOT_USER="minioadmin"
+MINIO_ROOT_PASSWORD=$(openssl rand -base64 16 | tr -d '=+/')
+MINIO_ACCESS_KEY=$(openssl rand -hex 10)
+MINIO_SECRET_KEY=$(openssl rand -base64 24 | tr -d '=+/')
 
 # ═══════════════════════════════════════════════════════════════
-# CLEANUP EXISTING RESOURCES (if any)
+# CLEANUP EXISTING RESOURCES
 # ═══════════════════════════════════════════════════════════════
-echo -e "${YELLOW}Cleaning up any existing Nextcloud resources...${NC}"
+echo -e "${YELLOW}Cleaning up any existing resources...${NC}"
 helm uninstall nextcloud 2>/dev/null || true
 oc delete secret nextcloud-db nextcloud-admin nextcloud --ignore-not-found 2>/dev/null || true
 oc delete configmap nextcloud-nginxconfig --ignore-not-found 2>/dev/null || true
 oc delete route nextcloud --ignore-not-found 2>/dev/null || true
 sleep 3
+
+# ═══════════════════════════════════════════════════════════════
+# MINIO DEPLOYMENT (S3-Compatible Object Storage)
+# ═══════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}  Deploying MinIO (S3-Compatible Object Storage)${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Create MinIO secret
+echo -e "${YELLOW}Creating MinIO secrets...${NC}"
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-secret
+  labels:
+    app: minio
+    app.kubernetes.io/part-of: nextcloud
+type: Opaque
+stringData:
+  root-user: ${MINIO_ROOT_USER}
+  root-password: ${MINIO_ROOT_PASSWORD}
+  access-key: ${MINIO_ACCESS_KEY}
+  secret-key: ${MINIO_SECRET_KEY}
+EOF
+
+# Create MinIO PVC (gp3 for fast block storage)
+if ! oc get pvc minio-pvc &>/dev/null; then
+    echo -e "${YELLOW}Creating MinIO persistent storage (gp3 - fast)...${NC}"
+    cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  labels:
+    app: minio
+    app.kubernetes.io/part-of: nextcloud
+spec:
+  storageClassName: gp3
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+EOF
+else
+    echo -e "${GREEN}MinIO PVC already exists, reusing...${NC}"
+fi
+
+# Create MinIO Deployment
+echo -e "${YELLOW}Deploying MinIO...${NC}"
+cat <<EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  labels:
+    app: minio
+    app.kubernetes.io/part-of: nextcloud
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:latest
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: root-password
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: minio-data
+          persistentVolumeClaim:
+            claimName: minio-pvc
+EOF
+
+# Create MinIO Service
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels:
+    app: minio
+    app.kubernetes.io/part-of: nextcloud
+spec:
+  selector:
+    app: minio
+  ports:
+    - port: 9000
+      targetPort: 9000
+      name: api
+    - port: 9001
+      targetPort: 9001
+      name: console
+EOF
+
+# Wait for MinIO
+echo -e "${YELLOW}Waiting for MinIO to be ready...${NC}"
+oc rollout status deployment/minio --timeout=180s || true
+
+# Create bucket for Nextcloud
+echo -e "${YELLOW}Creating Nextcloud bucket in MinIO...${NC}"
+sleep 10  # Give MinIO time to fully start
+
+for i in {1..12}; do
+    if oc exec deployment/minio -- mc alias set local http://localhost:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &>/dev/null; then
+        oc exec deployment/minio -- mc mb local/nextcloud --ignore-existing 2>/dev/null || true
+        # Create access policy for the bucket
+        oc exec deployment/minio -- mc admin user add local ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY} 2>/dev/null || true
+        oc exec deployment/minio -- mc admin policy attach local readwrite --user ${MINIO_ACCESS_KEY} 2>/dev/null || true
+        echo -e "${GREEN}✓ MinIO bucket 'nextcloud' created!${NC}"
+        break
+    fi
+    echo "Waiting for MinIO API... ($i/12)"
+    sleep 5
+done
 
 # ═══════════════════════════════════════════════════════════════
 # MARIADB DEPLOYMENT (SCLORG)
@@ -119,7 +300,7 @@ stringData:
   database-name: nextcloud
 EOF
 
-# Create MariaDB PVC (gp3 block storage - databases need RWO)
+# Create MariaDB PVC
 if ! oc get pvc mariadb-pvc &>/dev/null; then
     echo -e "${YELLOW}Creating MariaDB persistent storage (gp3)...${NC}"
     cat <<EOF | oc apply -f -
@@ -243,11 +424,20 @@ spec:
       name: mariadb
 EOF
 
-# Wait for MariaDB to be ready
-echo -e "${YELLOW}Waiting for MariaDB to be ready (this may take 1-2 minutes)...${NC}"
-oc rollout status deployment/mariadb --timeout=180s || {
-    echo -e "${YELLOW}MariaDB still starting, continuing...${NC}"
-}
+# Wait for MariaDB
+echo -e "${YELLOW}Waiting for MariaDB to be ready...${NC}"
+oc rollout status deployment/mariadb --timeout=180s || true
+
+# Verify MariaDB
+echo -e "${YELLOW}Verifying MariaDB connection...${NC}"
+for i in {1..12}; do
+    if oc exec deployment/mariadb -- mysql -u nextcloud -p${MARIADB_PASSWORD} -e "SELECT 1" nextcloud &>/dev/null; then
+        echo -e "${GREEN}✓ MariaDB is ready!${NC}"
+        break
+    fi
+    echo "Waiting for MariaDB... ($i/12)"
+    sleep 5
+done
 
 # ═══════════════════════════════════════════════════════════════
 # REDIS DEPLOYMENT (SCLORG)
@@ -294,7 +484,6 @@ spec:
     spec:
       containers:
         - name: redis
-          # SCLORG Redis - runs as arbitrary UID, perfect for OpenShift restricted SCC
           image: quay.io/sclorg/redis-6-c9s:latest
           ports:
             - containerPort: 6379
@@ -350,43 +539,16 @@ spec:
       name: redis
 EOF
 
-# Wait for Redis to be ready
+# Wait for Redis
 echo -e "${YELLOW}Waiting for Redis to be ready...${NC}"
-oc rollout status deployment/redis --timeout=120s || {
-    echo -e "${YELLOW}Redis still starting, continuing...${NC}"
-}
-
-# Verify Redis is responding
-echo -e "${YELLOW}Verifying Redis connection...${NC}"
-for i in {1..12}; do
-    if oc exec deployment/redis -- redis-cli -a ${REDIS_PASSWORD} ping 2>/dev/null | grep -q PONG; then
-        echo -e "${GREEN}✓ Redis is ready!${NC}"
-        break
-    fi
-    echo "Waiting for Redis... ($i/12)"
-    sleep 5
-done
-
-# ═══════════════════════════════════════════════════════════════
-# VERIFY MARIADB
-# ═══════════════════════════════════════════════════════════════
-echo ""
-echo -e "${YELLOW}Verifying MariaDB connection...${NC}"
-for i in {1..12}; do
-    if oc exec deployment/mariadb -- mysql -u nextcloud -p${MARIADB_PASSWORD} -e "SELECT 1" nextcloud &>/dev/null; then
-        echo -e "${GREEN}✓ MariaDB is ready!${NC}"
-        break
-    fi
-    echo "Waiting for MariaDB... ($i/12)"
-    sleep 5
-done
+oc rollout status deployment/redis --timeout=120s || true
 
 # ═══════════════════════════════════════════════════════════════
 # NEXTCLOUD DEPLOYMENT
 # ═══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}  Deploying Nextcloud (${REPLICAS} replicas with EFS storage)${NC}"
+echo -e "${BLUE}  Deploying Nextcloud (with S3 Object Storage)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 # Create Nextcloud admin secret
@@ -409,12 +571,12 @@ echo -e "${YELLOW}Adding Nextcloud Helm repository...${NC}"
 helm repo add nextcloud https://nextcloud.github.io/helm/ 2>/dev/null || true
 helm repo update
 
-# Create values file with MariaDB, Redis, and EFS configuration
+# Create values file
 echo -e "${YELLOW}Creating Nextcloud configuration...${NC}"
-cat > /tmp/nextcloud-mariadb-values.yaml <<'VALUESEOF'
-# Nextcloud with External MariaDB, Redis, and EFS Storage (Scalable)
+cat > /tmp/nextcloud-values.yaml <<VALUESEOF
+# Nextcloud with S3 Object Storage (MinIO)
 
-replicaCount: REPLICAS_PLACEHOLDER
+replicaCount: ${REPLICAS}
 
 image:
   repository: nextcloud
@@ -422,8 +584,9 @@ image:
   pullPolicy: IfNotPresent
 
 nextcloud:
-  host: HOSTNAME_PLACEHOLDER
+  host: ${HOSTNAME}
   username: admin
+  password: ${ADMIN_PASSWORD}
   containerPort: 9000
 
   podSecurityContext:
@@ -446,32 +609,29 @@ nextcloud:
       value: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
     - name: OVERWRITEPROTOCOL
       value: "https"
-    - name: REDIS_HOST
-      value: "redis"
-    - name: REDIS_HOST_PORT
-      value: "6379"
-    - name: REDIS_HOST_PASSWORD
-      value: "REDIS_PASSWORD_PLACEHOLDER"
+    - name: OBJECTSTORE_S3_HOST
+      value: "minio"
+    - name: OBJECTSTORE_S3_PORT
+      value: "9000"
+    - name: OBJECTSTORE_S3_SSL
+      value: "false"
+    - name: OBJECTSTORE_S3_USEPATH_STYLE
+      value: "true"
+    - name: OBJECTSTORE_S3_BUCKET
+      value: "nextcloud"
+    - name: OBJECTSTORE_S3_KEY
+      value: "${MINIO_ACCESS_KEY}"
+    - name: OBJECTSTORE_S3_SECRET
+      value: "${MINIO_SECRET_KEY}"
 
   configs:
     proxy.config.php: |-
       <?php
-      $CONFIG = array (
+      \$CONFIG = array (
         'trusted_proxies' => ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
         'overwriteprotocol' => 'https',
       );
-    redis.config.php: |-
-      <?php
-      $CONFIG = array (
-        'memcache.local' => '\\OC\\Memcache\\APCu',
-        'memcache.distributed' => '\\OC\\Memcache\\Redis',
-        'memcache.locking' => '\\OC\\Memcache\\Redis',
-        'redis' => array(
-          'host' => 'redis',
-          'port' => 6379,
-          'password' => 'REDIS_PASSWORD_PLACEHOLDER',
-        ),
-      );
+    # S3 is configured via OBJECTSTORE_S3_* environment variables above
 
 nginx:
   enabled: true
@@ -500,7 +660,7 @@ nginx:
           root /var/www/html;
           index index.php index.html;
           
-          client_max_body_size 512M;
+          client_max_body_size 10G;
           fastcgi_buffers 64 4K;
           
           location = /robots.txt {
@@ -512,22 +672,22 @@ nginx:
           location ^~ /.well-known {
               location = /.well-known/carddav { return 301 /remote.php/dav/; }
               location = /.well-known/caldav { return 301 /remote.php/dav/; }
-              return 301 /index.php$request_uri;
+              return 301 /index.php\$request_uri;
           }
           
           location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/) { return 404; }
           location ~ ^/(?:\.|autotest|occ|issue|indie|db_|console) { return 404; }
           
           location ~ \.php(?:$|/) {
-              rewrite ^/(?!index|remote|public|cron|core\/ajax\/update|status|ocs\/v[12]|updater\/.+|oc[ms]-provider\/.+|.+\/richdocumentscode(_arm64)?\/proxy) /index.php$request_uri;
+              rewrite ^/(?!index|remote|public|cron|core\/ajax\/update|status|ocs\/v[12]|updater\/.+|oc[ms]-provider\/.+|.+\/richdocumentscode(_arm64)?\/proxy) /index.php\$request_uri;
               
               fastcgi_split_path_info ^(.+?\.php)(/.*)$;
-              set $path_info $fastcgi_path_info;
-              try_files $fastcgi_script_name =404;
+              set \$path_info \$fastcgi_path_info;
+              try_files \$fastcgi_script_name =404;
               
               include fastcgi_params;
-              fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-              fastcgi_param PATH_INFO $path_info;
+              fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+              fastcgi_param PATH_INFO \$path_info;
               fastcgi_param HTTPS on;
               fastcgi_param modHeadersAvailable true;
               fastcgi_param front_controller_active true;
@@ -535,31 +695,30 @@ nginx:
               
               fastcgi_intercept_errors on;
               fastcgi_request_buffering off;
-              fastcgi_read_timeout 300;
+              fastcgi_read_timeout 3600;
           }
           
           location ~ \.(?:css|js|mjs|svg|gif|png|jpg|ico|wasm|tflite|map)$ {
-              try_files $uri /index.php$request_uri;
+              try_files \$uri /index.php\$request_uri;
               expires max;
               access_log off;
           }
           
           location ~ \.woff2?$ {
-              try_files $uri /index.php$request_uri;
+              try_files \$uri /index.php\$request_uri;
               expires 7d;
               access_log off;
           }
           
           location / {
-              try_files $uri /index.php$request_uri;
+              try_files \$uri /index.php\$request_uri;
           }
       }
 
-# Disable internal SQLite database
+# Database
 internalDatabase:
   enabled: false
 
-# External database configuration - MariaDB
 externalDatabase:
   enabled: true
   type: mysql
@@ -567,9 +726,8 @@ externalDatabase:
   port: 3306
   database: nextcloud
   user: nextcloud
-  password: MARIADB_PASSWORD_PLACEHOLDER
+  password: ${MARIADB_PASSWORD}
 
-# Disable bundled database charts (we deploy our own)
 postgresql:
   enabled: false
 
@@ -579,12 +737,13 @@ mariadb:
 redis:
   enabled: false
 
-# Persistence - EFS for RWX (enables scaling)
+# Storage - gp3 for app code (fast, correct ownership)
+# Note: RWO limits to single replica, but MinIO handles user files
 persistence:
   enabled: true
-  storageClass: "efs-sc"
-  accessMode: ReadWriteMany
-  size: 10Gi
+  storageClass: "gp3"
+  accessMode: ReadWriteOnce
+  size: 5Gi
   
   nextcloudData:
     enabled: false
@@ -599,14 +758,14 @@ ingress:
 
 livenessProbe:
   enabled: true
-  initialDelaySeconds: 60
+  initialDelaySeconds: 120
   periodSeconds: 30
   timeoutSeconds: 10
   failureThreshold: 6
 
 readinessProbe:
   enabled: true
-  initialDelaySeconds: 60
+  initialDelaySeconds: 120
   periodSeconds: 15
   timeoutSeconds: 10
   failureThreshold: 6
@@ -616,18 +775,18 @@ startupProbe:
   initialDelaySeconds: 30
   periodSeconds: 10
   timeoutSeconds: 5
-  failureThreshold: 60
+  failureThreshold: 90
 
 resources:
   requests:
     cpu: 100m
     memory: 256Mi
   limits:
-    cpu: 1000m
+    cpu: 2000m
     memory: 1Gi
 
 rbac:
-  enabled: true
+  enabled: false
   serviceaccount:
     create: true
     name: nextcloud-sa
@@ -642,29 +801,15 @@ metrics:
   enabled: false
 VALUESEOF
 
-# Replace placeholders in values file (handle macOS vs Linux sed)
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    sed -i '' "s/HOSTNAME_PLACEHOLDER/${HOSTNAME}/g" /tmp/nextcloud-mariadb-values.yaml
-    sed -i '' "s/MARIADB_PASSWORD_PLACEHOLDER/${MARIADB_PASSWORD}/g" /tmp/nextcloud-mariadb-values.yaml
-    sed -i '' "s/REDIS_PASSWORD_PLACEHOLDER/${REDIS_PASSWORD}/g" /tmp/nextcloud-mariadb-values.yaml
-    sed -i '' "s/REPLICAS_PLACEHOLDER/${REPLICAS}/g" /tmp/nextcloud-mariadb-values.yaml
-else
-    sed -i "s/HOSTNAME_PLACEHOLDER/${HOSTNAME}/g" /tmp/nextcloud-mariadb-values.yaml
-    sed -i "s/MARIADB_PASSWORD_PLACEHOLDER/${MARIADB_PASSWORD}/g" /tmp/nextcloud-mariadb-values.yaml
-    sed -i "s/REDIS_PASSWORD_PLACEHOLDER/${REDIS_PASSWORD}/g" /tmp/nextcloud-mariadb-values.yaml
-    sed -i "s/REPLICAS_PLACEHOLDER/${REPLICAS}/g" /tmp/nextcloud-mariadb-values.yaml
-fi
-
 echo -e "${YELLOW}Installing Nextcloud via Helm...${NC}"
 helm install "${RELEASE_NAME}" nextcloud/nextcloud \
     --namespace "${NAMESPACE}" \
-    --values /tmp/nextcloud-mariadb-values.yaml \
-    --set nextcloud.password="${ADMIN_PASSWORD}" \
-    --timeout 10m
+    --values /tmp/nextcloud-values.yaml \
+    --timeout 15m
 
-# Wait for deployment to be created
-echo -e "${YELLOW}Waiting for Nextcloud deployment to be created...${NC}"
-sleep 10
+# Wait for deployment
+echo -e "${YELLOW}Waiting for Nextcloud deployment...${NC}"
+sleep 15
 
 # ═══════════════════════════════════════════════════════════════
 # CRITICAL FIXES
@@ -674,13 +819,13 @@ echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${BLUE}  Applying Critical Fixes${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-# FIX 1: Service targetPort (Helm sets 9000, needs to be 8080 for nginx)
+# FIX 1: Service targetPort
 echo -e "${YELLOW}Fix 1: Patching service targetPort to 8080...${NC}"
 oc patch svc nextcloud --type='json' -p='[
   {"op": "replace", "path": "/spec/ports/0/targetPort", "value": 8080}
 ]'
 
-# FIX 2: Probe ports (must target nginx on 8080, not PHP-FPM on 9000)
+# FIX 2: Probe ports
 echo -e "${YELLOW}Fix 2: Patching probe ports to 8080...${NC}"
 oc patch deploy nextcloud --type='json' -p='[
   {"op": "replace", "path": "/spec/template/spec/containers/1/readinessProbe/httpGet/port", "value": 8080},
@@ -688,7 +833,7 @@ oc patch deploy nextcloud --type='json' -p='[
   {"op": "replace", "path": "/spec/template/spec/containers/1/startupProbe/httpGet/port", "value": 8080}
 ]'
 
-# FIX 3: Add Host header to probes (prevents 400 Bad Request from untrusted host)
+# FIX 3: Host headers for probes
 echo -e "${YELLOW}Fix 3: Adding Host header to probes...${NC}"
 oc patch deploy nextcloud --type='json' -p='[
   {"op": "add", "path": "/spec/template/spec/containers/1/startupProbe/httpGet/httpHeaders", "value": [{"name": "Host", "value": "localhost"}]},
@@ -696,7 +841,7 @@ oc patch deploy nextcloud --type='json' -p='[
   {"op": "add", "path": "/spec/template/spec/containers/1/livenessProbe/httpGet/httpHeaders", "value": [{"name": "Host", "value": "localhost"}]}
 ]'
 
-# Create OpenShift Route
+# Create Route
 echo -e "${YELLOW}Creating OpenShift Route...${NC}"
 cat <<EOF | oc apply -f -
 apiVersion: route.openshift.io/v1
@@ -707,7 +852,7 @@ metadata:
     app.kubernetes.io/name: nextcloud
     app.kubernetes.io/part-of: nextcloud
   annotations:
-    haproxy.router.openshift.io/timeout: 300s
+    haproxy.router.openshift.io/timeout: 3600s
 spec:
   host: ${HOSTNAME}
   to:
@@ -722,22 +867,54 @@ spec:
   wildcardPolicy: None
 EOF
 
-# Wait for pod to be running
-echo -e "${YELLOW}Waiting for Nextcloud pods to start...${NC}"
-oc rollout status deploy/nextcloud --timeout=300s || true
+# Create MinIO console route (optional, for debugging)
+cat <<EOF | oc apply -f -
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: minio-console
+  labels:
+    app: minio
+    app.kubernetes.io/part-of: nextcloud
+spec:
+  host: minio-${NAMESPACE}.${HOSTNAME#*-${NAMESPACE}.}
+  to:
+    kind: Service
+    name: minio
+    weight: 100
+  port:
+    targetPort: 9001
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+EOF
 
-# Wait for at least one container to be ready
-echo -e "${YELLOW}Waiting for Nextcloud containers to be ready...${NC}"
-for i in {1..60}; do
-    READY_PODS=$(oc get pods -l app.kubernetes.io/name=nextcloud -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null | tr ' ' '\n' | grep -c "true" || echo "0")
-    EXPECTED=$((REPLICAS * 2))  # 2 containers per pod
-    if [ "$READY_PODS" -ge "2" ]; then
-        echo -e "${GREEN}✓ At least one pod ready!${NC}"
+# Wait for pods
+echo ""
+echo -e "${YELLOW}Waiting for Nextcloud initialization...${NC}"
+echo -e "${YELLOW}(gp3 is faster than EFS - should take 2-3 minutes)${NC}"
+echo ""
+
+# Monitor progress
+for i in {1..90}; do
+    PHASE=$(oc get pods -l app.kubernetes.io/name=nextcloud -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Pending")
+    READY=$(oc get pods -l app.kubernetes.io/name=nextcloud -o jsonpath='{.items[0].status.containerStatuses[*].ready}' 2>/dev/null | tr ' ' '\n' | grep -c "true" 2>/dev/null || echo "0")
+    
+    if [ "$READY" = "2" ]; then
+        echo -e "\n${GREEN}✓ Nextcloud is ready!${NC}"
         break
     fi
-    echo "Waiting for containers... ($i/60) - $READY_PODS containers ready"
-    sleep 5
+    
+    # Show file count progress every 10 iterations
+    if [ $((i % 10)) -eq 0 ]; then
+        FILES=$(oc exec deploy/nextcloud -c nextcloud -- find /var/www/html -type f 2>/dev/null | wc -l 2>/dev/null || echo "?")
+        echo "  Files synced: ~${FILES} (need ~20,000)"
+    else
+        echo -n "."
+    fi
+    sleep 10
 done
+echo ""
 
 # ═══════════════════════════════════════════════════════════════
 # NEXTCLOUD CONFIGURATION
@@ -747,29 +924,39 @@ echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${BLUE}  Configuring Nextcloud${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-# Wait for config.php to exist
-echo -e "${YELLOW}Waiting for Nextcloud initialization...${NC}"
+# Wait for config.php
+echo -e "${YELLOW}Waiting for Nextcloud config...${NC}"
 for i in {1..30}; do
     if oc exec deploy/nextcloud -c nextcloud -- test -f /var/www/html/config/config.php 2>/dev/null; then
         echo -e "${GREEN}✓ config.php exists${NC}"
         break
     fi
     echo "Waiting for config.php... ($i/30)"
-    sleep 5
+    sleep 10
 done
 
-# FIX 4: Disable data directory permission check (direct config edit to avoid occ chicken-egg)
-echo -e "${YELLOW}Fix 4: Disabling data directory permission check...${NC}"
+# Apply configurations
+echo -e "${YELLOW}Applying Nextcloud configurations...${NC}"
+sleep 5
+
+# Disable permission check
 oc exec deploy/nextcloud -c nextcloud -- sed -i "s/);/  'check_data_directory_permissions' => false,\n);/" /var/www/html/config/config.php 2>/dev/null || true
 
-# FIX 5: Add all required trusted domains
-echo -e "${YELLOW}Fix 5: Configuring trusted domains...${NC}"
-sleep 5  # Let the config change settle
+# Set trusted domains
 oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set trusted_domains 0 --value="localhost" 2>/dev/null || true
 oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set trusted_domains 1 --value="127.0.0.1" 2>/dev/null || true
 oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set trusted_domains 2 --value="${HOSTNAME}" 2>/dev/null || true
 oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set trusted_domains 3 --value="nextcloud" 2>/dev/null || true
 oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set trusted_domains 4 --value="nextcloud.${NAMESPACE}.svc.cluster.local" 2>/dev/null || true
+
+# Configure Redis
+echo -e "${YELLOW}Configuring Redis...${NC}"
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set redis host --value="redis" 2>/dev/null || true
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set redis port --value="6379" --type=integer 2>/dev/null || true
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set redis password --value="${REDIS_PASSWORD}" 2>/dev/null || true
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set memcache.local --value='\OC\Memcache\APCu' 2>/dev/null || true
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set memcache.distributed --value='\OC\Memcache\Redis' 2>/dev/null || true
+oc exec deploy/nextcloud -c nextcloud -- php occ config:system:set memcache.locking --value='\OC\Memcache\Redis' 2>/dev/null || true
 
 echo -e "${GREEN}✓ Nextcloud configured!${NC}"
 
@@ -782,128 +969,112 @@ echo -e "${GREEN}  Deployment Complete!${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
-# Show pod status
+# Pod status
 echo -e "${BLUE}Pod Status:${NC}"
-oc get pods -l app.kubernetes.io/part-of=nextcloud 2>/dev/null || oc get pods
+oc get pods -l app.kubernetes.io/part-of=nextcloud
 echo ""
 
-# Verify SCCs
+# SCC verification
 echo -e "${BLUE}Security Context Constraints:${NC}"
-for pod in $(oc get pods -o name 2>/dev/null | grep -E "(nextcloud|mariadb|redis)"); do
+for pod in $(oc get pods -o name 2>/dev/null | grep -E "(nextcloud|mariadb|redis|minio)"); do
     SCC=$(oc get ${pod} -o jsonpath='{.metadata.annotations.openshift\.io/scc}' 2>/dev/null || echo "unknown")
     echo -e "  ${pod}: ${GREEN}${SCC}${NC}"
 done
 echo ""
 
-# Display access information
+# Access info
+MINIO_CONSOLE_URL="https://minio-${NAMESPACE}.${HOSTNAME#*-${NAMESPACE}.}"
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║              NEXTCLOUD ACCESS INFORMATION                      ║${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║${NC} URL:      ${GREEN}https://${HOSTNAME}${NC}"
-echo -e "${GREEN}║${NC} Username: ${GREEN}admin${NC}"
-echo -e "${GREEN}║${NC} Password: ${GREEN}${ADMIN_PASSWORD}${NC}"
+echo -e "${GREEN}║${NC} Nextcloud URL:  ${GREEN}https://${HOSTNAME}${NC}"
+echo -e "${GREEN}║${NC} Username:       ${GREEN}admin${NC}"
+echo -e "${GREEN}║${NC} Password:       ${GREEN}${ADMIN_PASSWORD}${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║${NC} Replicas: ${BLUE}${REPLICAS}${NC} (scalable with EFS storage)"
-echo -e "${GREEN}║${NC} Storage:  ${BLUE}EFS (ReadWriteMany)${NC}"
-echo -e "${GREEN}║${NC} Database: ${BLUE}MariaDB 10.11 (SCLORG)${NC}"
-echo -e "${GREEN}║${NC} Cache:    ${BLUE}Redis 6 (SCLORG)${NC}"
+echo -e "${GREEN}║${NC} MinIO Console:  ${BLUE}${MINIO_CONSOLE_URL}${NC}"
+echo -e "${GREEN}║${NC} MinIO User:     ${BLUE}${MINIO_ROOT_USER}${NC}"
+echo -e "${GREEN}║${NC} MinIO Password: ${BLUE}${MINIO_ROOT_PASSWORD}${NC}"
+echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC} Storage:        ${BLUE}MinIO S3 (fast object storage)${NC}"
+echo -e "${GREEN}║${NC} Database:       ${BLUE}MariaDB 10.11 (SCLORG)${NC}"
+echo -e "${GREEN}║${NC} Cache:          ${BLUE}Redis 6 (SCLORG)${NC}"
+echo -e "${GREEN}║${NC} App Storage:    ${BLUE}gp3 (fast EBS)${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${YELLOW}NOTE: First load may take 30-60 seconds while Nextcloud initializes.${NC}"
+echo -e "${YELLOW}Note: Single replica only (gp3 = RWO). User files scale via MinIO S3.${NC}"
 echo ""
 
 # Save credentials
-cat > nextcloud-mariadb-credentials.txt <<EOF
-Nextcloud with MariaDB + Redis (Developer Sandbox - Scalable)
-=============================================================
+cat > nextcloud-credentials.txt <<EOF
+Nextcloud with MinIO S3 Storage (Developer Sandbox)
+====================================================
+Generated: $(date)
+
+Nextcloud:
+----------
 URL: https://${HOSTNAME}
 Username: admin
 Password: ${ADMIN_PASSWORD}
 Namespace: ${NAMESPACE}
 
-Architecture:
--------------
-Nextcloud Replicas: ${REPLICAS}
-Storage: EFS (efs-sc) - ReadWriteMany
-Database: MariaDB 10.11 (SCLORG) - gp3
-Cache: Redis 6 (SCLORG)
+MinIO Console:
+--------------
+URL: ${MINIO_CONSOLE_URL}
+Root User: ${MINIO_ROOT_USER}
+Root Password: ${MINIO_ROOT_PASSWORD}
+Access Key: ${MINIO_ACCESS_KEY}
+Secret Key: ${MINIO_SECRET_KEY}
+Bucket: nextcloud
 
-Database Information:
----------------------
-Host: mariadb
-Port: 3306
+Database (MariaDB):
+-------------------
+Host: mariadb:3306
 Database: nextcloud
-DB User: nextcloud
-DB Password: ${MARIADB_PASSWORD}
+User: nextcloud
+Password: ${MARIADB_PASSWORD}
 
-Redis Information:
-------------------
-Host: redis
-Port: 6379
+Redis:
+------
+Host: redis:6379
 Password: ${REDIS_PASSWORD}
 
-Generated: $(date)
+Architecture:
+-------------
+• MinIO: S3 object storage for user files (scalable, fast)
+• MariaDB: Metadata database
+• Redis: Sessions and file locking (enables multi-pod)
+• gp3: App code storage (fast EBS, single replica)
 
-Applied Fixes:
---------------
-1. Service targetPort: 9000 -> 8080 (nginx, not PHP-FPM)
-2. Probe ports: 9000 -> 8080
-3. Probe Host header: Added "Host: localhost"
-4. Disabled data directory permission check
-5. Trusted domains: localhost, 127.0.0.1, external hostname, service names
+Note on Scaling:
+----------------
+# Nextcloud app is single-replica (gp3 = RWO)
+# But user files scale infinitely via MinIO S3
+# To enable multi-replica, use a custom image with baked-in files
 
-Scaling Commands:
------------------
-# Scale up to 3 replicas
-oc scale deploy/nextcloud --replicas=3
-
-# Scale down to 1 replica
-oc scale deploy/nextcloud --replicas=1
-
-# Check current replicas
-oc get deploy nextcloud
-
-Troubleshooting Commands:
--------------------------
-# Check all pods
-oc get pods
-
-# View Nextcloud logs
+Troubleshooting:
+----------------
+# Nextcloud logs
 oc logs deploy/nextcloud -c nextcloud
 oc logs deploy/nextcloud -c nextcloud-nginx
 
-# View MariaDB logs
-oc logs deploy/mariadb
+# MinIO logs
+oc logs deploy/minio
 
-# View Redis logs
-oc logs deploy/redis
+# Test S3 connectivity
+oc exec deploy/nextcloud -c nextcloud -- curl -s http://minio:9000/minio/health/ready
 
-# Connect to MariaDB
-oc exec -it deploy/mariadb -- mysql -u nextcloud -p${MARIADB_PASSWORD} nextcloud
+# Check S3 config
+oc exec deploy/nextcloud -c nextcloud -- cat /var/www/html/config/config.php | grep -A15 objectstore
 
-# Test Redis
+# Redis test
 oc exec deploy/redis -- redis-cli -a ${REDIS_PASSWORD} ping
-
-# Test health endpoint
-oc exec deploy/nextcloud -c nextcloud-nginx -- curl -s -H "Host: localhost" http://localhost:8080/status.php
-
-# Check trusted domains
-oc exec deploy/nextcloud -c nextcloud -- cat /var/www/html/config/config.php | grep -A10 trusted_domains
-
-# Verify Redis is being used
-oc exec deploy/nextcloud -c nextcloud -- cat /var/www/html/config/config.php | grep -A10 redis
-
-# Restart deployments
-oc rollout restart deploy/nextcloud
-oc rollout restart deploy/mariadb
-oc rollout restart deploy/redis
 EOF
-chmod 600 nextcloud-mariadb-credentials.txt
-echo -e "Credentials saved to: ${GREEN}nextcloud-mariadb-credentials.txt${NC}"
+chmod 600 nextcloud-credentials.txt
+echo -e "Credentials saved to: ${GREEN}nextcloud-credentials.txt${NC}"
 
 # Cleanup
-rm -f /tmp/nextcloud-mariadb-values.yaml
+rm -f /tmp/nextcloud-values.yaml
 
 echo ""
-echo -e "${GREEN}🎉 Deployment complete! Nextcloud running with ${REPLICAS} replicas, MariaDB, and Redis.${NC}"
-echo -e "${GREEN}   All components running under restricted SCC.${NC}"
+echo -e "${GREEN}🎉 Cloud-native Nextcloud deployed with S3 object storage!${NC}"
+echo -e "${GREEN}   Files are stored in MinIO - fast and scalable.${NC}"
