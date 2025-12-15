@@ -1,0 +1,155 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Nextcloud Container for OpenShift
+# Base: CentOS Stream 9 + Remi PHP 8.3 + nginx
+# Runs as non-root, OpenShift restricted SCC compatible
+# ═══════════════════════════════════════════════════════════════════════════════
+
+FROM quay.io/centos/centos:stream9
+
+LABEL maintainer="Ryan Nix" \
+      description="Nextcloud for OpenShift with nginx + PHP-FPM" \
+      version="32.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Install packages
+# ─────────────────────────────────────────────────────────────────────────────
+RUN dnf -y install epel-release && \
+    dnf -y install https://rpms.remirepo.net/enterprise/remi-release-9.rpm && \
+    dnf -y module reset php && \
+    dnf -y module enable php:remi-8.3 && \
+    dnf -y install \
+        nginx \
+        php-fpm \
+        php-cli \
+        php-gd \
+        php-mbstring \
+        php-intl \
+        php-pecl-apcu \
+        php-mysqlnd \
+        php-pgsql \
+        php-pecl-redis5 \
+        php-opcache \
+        php-zip \
+        php-xml \
+        php-curl \
+        php-bcmath \
+        php-gmp \
+        php-pecl-imagick \
+        ImageMagick \
+        php-ldap \
+        php-process \
+        php-sodium \
+        supervisor \
+        bzip2 \
+        unzip \
+        procps-ng \
+        && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Download and install Nextcloud
+# ─────────────────────────────────────────────────────────────────────────────
+ARG NEXTCLOUD_VERSION=32.0.2
+ENV NEXTCLOUD_VERSION=${NEXTCLOUD_VERSION}
+
+RUN curl -fsSL https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2 -o /tmp/nextcloud.tar.bz2 && \
+    curl -fsSL https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2.sha256 -o /tmp/nextcloud.sha256 && \
+    cd /tmp && grep "nextcloud-${NEXTCLOUD_VERSION}.tar.bz2$" nextcloud.sha256 | sed "s|nextcloud-${NEXTCLOUD_VERSION}.tar.bz2|nextcloud.tar.bz2|" | sha256sum -c - && \
+    mkdir -p /var/www/html && \
+    tar -xjf /tmp/nextcloud.tar.bz2 -C /var/www/html --strip-components=1 && \
+    rm -f /tmp/nextcloud.tar.bz2 /tmp/nextcloud.sha256
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configure nginx
+# ─────────────────────────────────────────────────────────────────────────────
+RUN rm -f /etc/nginx/nginx.conf
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configure PHP-FPM
+# ─────────────────────────────────────────────────────────────────────────────
+RUN sed -i \
+        -e 's/^listen = .*/listen = 127.0.0.1:9000/' \
+        -e 's/^user = .*/;user = nobody/' \
+        -e 's/^group = .*/;group = nobody/' \
+        -e 's/^listen.owner = .*/;listen.owner = nobody/' \
+        -e 's/^listen.group = .*/;listen.group = nobody/' \
+        -e 's/^;clear_env = .*/clear_env = no/' \
+        -e 's/^pm.max_children = .*/pm.max_children = 50/' \
+        -e 's/^pm.start_servers = .*/pm.start_servers = 5/' \
+        -e 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' \
+        -e 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 35/' \
+        /etc/php-fpm.d/www.conf
+
+# PHP settings
+RUN echo "memory_limit = 512M" > /etc/php.d/99-nextcloud.ini && \
+    echo "upload_max_filesize = 10G" >> /etc/php.d/99-nextcloud.ini && \
+    echo "post_max_size = 10G" >> /etc/php.d/99-nextcloud.ini && \
+    echo "max_execution_time = 3600" >> /etc/php.d/99-nextcloud.ini && \
+    echo "max_input_time = 3600" >> /etc/php.d/99-nextcloud.ini && \
+    echo "output_buffering = 0" >> /etc/php.d/99-nextcloud.ini && \
+    echo "opcache.enable = 1" >> /etc/php.d/99-nextcloud.ini && \
+    echo "opcache.memory_consumption = 128" >> /etc/php.d/99-nextcloud.ini && \
+    echo "opcache.interned_strings_buffer = 8" >> /etc/php.d/99-nextcloud.ini && \
+    echo "opcache.max_accelerated_files = 10000" >> /etc/php.d/99-nextcloud.ini && \
+    echo "opcache.revalidate_freq = 1" >> /etc/php.d/99-nextcloud.ini && \
+    echo "opcache.save_comments = 1" >> /etc/php.d/99-nextcloud.ini
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configure supervisord
+# ─────────────────────────────────────────────────────────────────────────────
+COPY supervisord.conf /etc/supervisord.conf
+RUN chmod 644 /etc/supervisord.conf && chgrp 0 /etc/supervisord.conf
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entrypoint script
+# ─────────────────────────────────────────────────────────────────────────────
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Set permissions for OpenShift (arbitrary UID)
+# ─────────────────────────────────────────────────────────────────────────────
+RUN mkdir -p /var/www/html/config \
+             /var/www/html/custom_apps \
+             /var/lib/php/session \
+             /var/lib/php/wsdlcache \
+             /var/lib/php/opcache \
+             /run/php-fpm \
+             /var/log/nginx \
+             /var/lib/nginx/tmp \
+             /var/log/php-fpm && \
+    rm -rf /var/www/html/data && \
+    chgrp -R 0 /var/www/html \
+               /var/lib/php \
+               /var/log/nginx \
+               /var/lib/nginx \
+               /var/log/php-fpm \
+               /run/php-fpm \
+               /etc/nginx \
+               /etc/php-fpm.d \
+               /etc/php.d && \
+    chmod -R g=u /var/www/html/config \
+                 /var/www/html/custom_apps \
+                 /var/lib/php \
+                 /var/log/nginx \
+                 /var/lib/nginx \
+                 /var/log/php-fpm \
+                 /run/php-fpm \
+                 /etc/nginx \
+                 /etc/php-fpm.d \
+                 /etc/php.d && \
+    chmod -R g+rX /var/www/html
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime configuration
+# ─────────────────────────────────────────────────────────────────────────────
+EXPOSE 8080
+
+USER 1001
+
+WORKDIR /var/www/html
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
