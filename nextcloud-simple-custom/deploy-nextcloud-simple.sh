@@ -95,6 +95,26 @@ spec:
   resources:
     requests:
       storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-apps-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nextcloud-config-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Mi
 EOF
     
     log "Deploying MariaDB..."
@@ -334,9 +354,11 @@ spec:
           persistentVolumeClaim:
             claimName: nextcloud-data-pvc
         - name: nextcloud-config
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: nextcloud-config-pvc
         - name: nextcloud-apps
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: nextcloud-apps-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -394,7 +416,7 @@ cleanup() {
     oc delete secret nextcloud-secret mariadb-secret redis-secret --ignore-not-found
     
     warn "PVCs are NOT deleted automatically. To delete them:"
-    echo "  oc delete pvc mariadb-pvc nextcloud-data-pvc"
+    echo "  oc delete pvc mariadb-pvc nextcloud-data-pvc nextcloud-apps-pvc nextcloud-config-pvc"
     
     log "Cleanup complete!"
 }

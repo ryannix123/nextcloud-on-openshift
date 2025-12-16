@@ -1,0 +1,176 @@
+# Network Policies for Nextcloud on OpenShift
+# Restricts traffic to only necessary connections
+#
+# Usage:
+#   oc apply -f networkpolicy.yaml
+#
+# Note: Requires NetworkPolicy support in your cluster (most OpenShift clusters have this)
+
+---
+# Allow ingress from OpenShift Router to Nextcloud
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-openshift-ingress
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nextcloud
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+
+---
+# Allow Nextcloud to communicate with MariaDB
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-to-mariadb
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mariadb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nextcloud
+      ports:
+        - protocol: TCP
+          port: 3306
+
+---
+# Allow Nextcloud to communicate with Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-to-redis
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nextcloud
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# Allow internal communication within Nextcloud pods (nginx <-> php-fpm)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nextcloud-internal
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nextcloud
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nextcloud
+      ports:
+        - protocol: TCP
+          port: 9000  # PHP-FPM
+        - protocol: TCP
+          port: 8080  # nginx
+
+---
+# Default deny all ingress (optional - uncomment to enable strict mode)
+# Warning: Only enable this after confirming the above policies work
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: default-deny-ingress
+# spec:
+#   podSelector: {}
+#   policyTypes:
+#     - Ingress
+
+---
+# Allow DNS resolution (required for most pods)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              dns.operator.openshift.io/daemonset-dns: default
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Alternative: Allow DNS to kube-dns/coredns
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+
+---
+# Allow egress to external services (HTTPS for app store, updates, etc.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-external-https
+  labels:
+    app.kubernetes.io/name: nextcloud
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nextcloud
+  policyTypes:
+    - Egress
+  egress:
+    # Allow HTTPS to external services
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+    # Allow internal cluster communication
+    - to:
+        - podSelector: {}

@@ -204,6 +204,32 @@ php /var/www/html/occ config:system:set default_phone_region --value="US"
 # Disable data directory permission check (OpenShift PVCs have restricted permissions)
 php /var/www/html/occ config:system:set check_data_directory_permissions --value=false --type=boolean
 
+# Configure apps paths - must set all at once to avoid incomplete config
+echo "Configuring apps paths..."
+php -r "
+\$configFile = '/var/www/html/config/config.php';
+include \$configFile;
+\$CONFIG['apps_paths'] = [
+    ['path' => '/var/www/html/apps', 'url' => '/apps', 'writable' => false],
+    ['path' => '/var/www/html/custom_apps', 'url' => '/custom_apps', 'writable' => true],
+];
+file_put_contents(\$configFile, '<?php' . chr(10) . '\$CONFIG = ' . var_export(\$CONFIG, true) . ';' . chr(10));
+echo 'Apps paths configured successfully';
+"
+
+# Set maintenance window (3 AM UTC)
+php /var/www/html/occ config:system:set maintenance_window_start --value=3 --type=integer
+
+# Configure Nextcloud Office (richdocuments) if installed
+if [ -d "/var/www/html/custom_apps/richdocuments" ]; then
+    echo "Configuring Nextcloud Office..."
+    # Get the first trusted domain for WOPI URLs
+    WOPI_HOST=$(echo "${NEXTCLOUD_TRUSTED_DOMAINS:-localhost}" | awk '{print $1}')
+    php /var/www/html/occ config:app:set richdocuments wopi_url --value="https://${WOPI_HOST}/custom_apps/richdocumentscode/proxy.php?req="
+    php /var/www/html/occ config:app:set richdocuments public_wopi_url --value="https://${WOPI_HOST}"
+    echo "Nextcloud Office configured for ${WOPI_HOST}"
+fi
+
 # Start services
 echo "Starting services..."
 exec /usr/bin/supervisord -n -c /etc/supervisord.conf

@@ -1,0 +1,300 @@
+# Nextcloud Helm Chart Values for OpenShift
+# Designed for restricted SCC - no elevated privileges required
+#
+# Usage:
+#   helm install nextcloud nextcloud/nextcloud \
+#     -f openshift-values.yaml \
+#     --set nextcloud.host=nextcloud.apps.your-cluster.com \
+#     -n nextcloud
+
+# =============================================================================
+# Nextcloud Configuration
+# =============================================================================
+nextcloud:
+  host: nextcloud.apps.example.com  # Override with --set nextcloud.host=...
+  username: admin
+  password: changeme  # Override with --set nextcloud.password=...
+  
+  # Extra environment variables
+  extraEnv:
+    - name: OVERWRITEPROTOCOL
+      value: "https"
+    - name: TRUSTED_PROXIES
+      value: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+    - name: NC_default_phone_region
+      value: "US"
+
+  # PHP configuration
+  phpConfigs:
+    uploadLimit.ini: |
+      upload_max_filesize = 10G
+      post_max_size = 10G
+      max_input_time = 3600
+      max_execution_time = 3600
+    www.conf: |
+      pm.max_children = 50
+      pm.start_servers = 5
+      pm.min_spare_servers = 5
+      pm.max_spare_servers = 35
+
+  # Nextcloud configuration
+  configs:
+    proxy.config.php: |-
+      <?php
+      $CONFIG = array(
+        'trusted_proxies' => array('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'),
+        'overwriteprotocol' => 'https',
+        'check_data_directory_permissions' => false,
+      );
+
+# =============================================================================
+# Container Image
+# =============================================================================
+image:
+  repository: nextcloud
+  tag: 32-fpm-alpine
+  pullPolicy: IfNotPresent
+
+# =============================================================================
+# Nginx Sidecar (required for FPM image)
+# =============================================================================
+nginx:
+  enabled: true
+  image:
+    repository: nginxinc/nginx-unprivileged
+    tag: alpine
+    pullPolicy: IfNotPresent
+  
+  # Custom nginx config for OpenShift
+  config:
+    default: |
+      upstream php-handler {
+          server 127.0.0.1:9000;
+      }
+      server {
+          listen 8080;
+          absolute_redirect off;
+          root /var/www/html;
+          index index.php index.html /index.php$request_uri;
+          
+          client_max_body_size 10G;
+          client_body_timeout 300s;
+          fastcgi_buffers 64 4K;
+          
+          gzip on;
+          gzip_vary on;
+          gzip_comp_level 4;
+          gzip_min_length 256;
+          gzip_proxied expired no-cache no-store private no_last_modified no_etag auth;
+          gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
+          
+          add_header Referrer-Policy "no-referrer" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          add_header X-Frame-Options "SAMEORIGIN" always;
+          add_header X-Permitted-Cross-Domain-Policies "none" always;
+          add_header X-Robots-Tag "noindex, nofollow" always;
+          add_header X-XSS-Protection "1; mode=block" always;
+          
+          location = /robots.txt {
+              allow all;
+              log_not_found off;
+              access_log off;
+          }
+          
+          location ^~ /.well-known {
+              location = /.well-known/carddav { return 301 /remote.php/dav/; }
+              location = /.well-known/caldav { return 301 /remote.php/dav/; }
+              location /.well-known/acme-challenge { try_files $uri $uri/ =404; }
+              location /.well-known/pki-validation { try_files $uri $uri/ =404; }
+              return 301 /index.php$request_uri;
+          }
+          
+          location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/) { return 404; }
+          location ~ ^/(?:\.|autotest|occ|issue|indie|db_|console) { return 404; }
+          
+          location ~ \.php(?:$|/) {
+              rewrite ^/(?!index|remote|public|cron|core\/ajax\/update|status|ocs\/v[12]|updater\/.+|ocs-provider\/.+|.+\/richdocumentscode(_arm64)?\/proxy) /index.php$request_uri;
+              fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+              set $path_info $fastcgi_path_info;
+              try_files $fastcgi_script_name =404;
+              include fastcgi_params;
+              fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+              fastcgi_param PATH_INFO $path_info;
+              fastcgi_param HTTPS on;
+              fastcgi_param modHeadersAvailable true;
+              fastcgi_param front_controller_active true;
+              fastcgi_pass php-handler;
+              fastcgi_intercept_errors on;
+              fastcgi_request_buffering off;
+              fastcgi_read_timeout 3600;
+              fastcgi_send_timeout 3600;
+          }
+          
+          location ~ \.(?:css|js|mjs|svg|gif|png|jpg|ico|wasm|tflite|map|ogg|flac)$ {
+              try_files $uri /index.php$request_uri;
+              add_header Cache-Control "public, max-age=15778463";
+              expires 6M;
+              access_log off;
+          }
+          
+          location ~ \.woff2?$ {
+              try_files $uri /index.php$request_uri;
+              expires 7d;
+              access_log off;
+          }
+          
+          location /remote {
+              return 301 /remote.php$request_uri;
+          }
+          
+          location / {
+              try_files $uri $uri/ /index.php$request_uri;
+          }
+      }
+
+# =============================================================================
+# Database - Internal MariaDB
+# =============================================================================
+internalDatabase:
+  enabled: false
+
+externalDatabase:
+  enabled: true
+  type: mysql
+  host: nextcloud-mariadb
+  database: nextcloud
+  user: nextcloud
+  password: changeme  # Override with --set externalDatabase.password=...
+  existingSecret:
+    enabled: false
+
+mariadb:
+  enabled: true
+  auth:
+    rootPassword: changeme  # Override with --set mariadb.auth.rootPassword=...
+    database: nextcloud
+    username: nextcloud
+    password: changeme  # Override with --set mariadb.auth.password=...
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+    # OpenShift security context
+    podSecurityContext:
+      enabled: false
+    containerSecurityContext:
+      enabled: false
+
+# =============================================================================
+# Redis Cache
+# =============================================================================
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: changeme  # Override with --set redis.auth.password=...
+  master:
+    persistence:
+      enabled: false
+    # OpenShift security context
+    podSecurityContext:
+      enabled: false
+    containerSecurityContext:
+      enabled: false
+  replica:
+    replicaCount: 0
+
+# =============================================================================
+# Persistence
+# =============================================================================
+persistence:
+  enabled: true
+  size: 20Gi
+  accessMode: ReadWriteOnce
+  # storageClass: ""  # Uses default storage class
+
+# =============================================================================
+# OpenShift Security Context - CRITICAL
+# =============================================================================
+# Let OpenShift assign UID from namespace range
+podSecurityContext:
+  fsGroup: null
+
+securityContext:
+  runAsUser: null
+  runAsGroup: null
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# =============================================================================
+# Resources
+# =============================================================================
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# =============================================================================
+# Probes - Target nginx on port 8080
+# =============================================================================
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 5
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 5
+  successThreshold: 1
+
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+  successThreshold: 1
+
+# =============================================================================
+# Service
+# =============================================================================
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+# =============================================================================
+# Ingress - Disabled (using OpenShift Route instead)
+# =============================================================================
+ingress:
+  enabled: false
+
+# =============================================================================
+# Cron
+# =============================================================================
+cronjob:
+  enabled: true
+  schedule: "*/5 * * * *"
+  curlInsecure: false
+  failedJobsHistoryLimit: 5
+  successfulJobsHistoryLimit: 2
+
+# =============================================================================
+# Metrics (optional)
+# =============================================================================
+metrics:
+  enabled: false

@@ -1,0 +1,58 @@
+# OpenShift Route for Nextcloud
+# Provides TLS termination and external access
+#
+# Usage:
+#   oc apply -f route.yaml
+#
+# Or with custom hostname:
+#   oc apply -f route.yaml
+#   oc patch route nextcloud -p '{"spec":{"host":"nextcloud.apps.your-cluster.com"}}'
+
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: nextcloud
+  labels:
+    app.kubernetes.io/name: nextcloud
+    app.kubernetes.io/component: web
+  annotations:
+    # Increase timeout for large file uploads
+    haproxy.router.openshift.io/timeout: 3600s
+    # Enable WebSocket support (needed for Collabora)
+    haproxy.router.openshift.io/websocket: "true"
+    # Rate limiting (optional - adjust as needed)
+    # haproxy.router.openshift.io/rate-limit-connections: "true"
+    # haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: "100"
+    # haproxy.router.openshift.io/rate-limit-connections.rate-http: "100"
+spec:
+  # Hostname - leave empty to auto-generate, or specify your domain
+  # host: nextcloud.apps.your-cluster.com
+  
+  to:
+    kind: Service
+    name: nextcloud
+    weight: 100
+  
+  port:
+    targetPort: 8080
+  
+  tls:
+    # Edge termination - TLS terminates at the router
+    termination: edge
+    # Redirect HTTP to HTTPS
+    insecureEdgeTerminationPolicy: Redirect
+    # Optional: Use custom certificate
+    # certificate: |
+    #   -----BEGIN CERTIFICATE-----
+    #   ...
+    #   -----END CERTIFICATE-----
+    # key: |
+    #   -----BEGIN RSA PRIVATE KEY-----
+    #   ...
+    #   -----END RSA PRIVATE KEY-----
+    # caCertificate: |
+    #   -----BEGIN CERTIFICATE-----
+    #   ...
+    #   -----END CERTIFICATE-----
+  
+  wildcardPolicy: None
