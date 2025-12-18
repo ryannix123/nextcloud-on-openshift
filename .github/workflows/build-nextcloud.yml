@@ -27,6 +27,7 @@ on:
   # Auto-run weekly to pick up new releases
   schedule:
   - cron: '0 6 * * 1' # Every Monday at 6am UTC
+
   # Build on push to main when container-related files change
   push:
     branches: [ main ]
@@ -97,15 +98,16 @@ jobs:
     # ─────────────────────────────────────────────────────────────────────────
     - name: Build with Podman
       if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      working-directory: ./nextcloud-simple-custom
       run: |
         echo "Building Nextcloud ${{ steps.version.outputs.version }}..."
 
         podman build \
           --build-arg NEXTCLOUD_VERSION=${{ steps.version.outputs.version }} \
-          --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
-          --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-          --file ${{ env.BUILD_CONTEXT }}/Containerfile \
-          ${{ env.BUILD_CONTEXT }}
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          -f Containerfile \
+          .
 
         echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
         echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
