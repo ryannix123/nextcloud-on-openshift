@@ -26,123 +26,120 @@ on:
 
   # Auto-run weekly to pick up new releases
   schedule:
-    - cron: '0 6 * * 1'  # Every Monday at 6am UTC
-
+  - cron: '0 6 * * 1' # Every Monday at 6am UTC
   # Build on push to main when container-related files change
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
-      - 'Containerfile'
-      - 'nginx.conf'
-      - 'supervisord.conf'
-      - 'entrypoint.sh'
-      - '.github/workflows/build-nextcloud.yml'
+    - 'nextcloud-simple-custom/Containerfile'
+    - 'nextcloud-simple-custom/nginx.conf'
+    - 'nextcloud-simple-custom/supervisord.conf'
+    - 'nextcloud-simple-custom/entrypoint.sh'
+    - '.github/workflows/build-nextcloud.yml'
 
 env:
   REGISTRY: quay.io
-  # ┌────────────────────────────────────────────────────────────────────────────
-  # │ UPDATE THIS: Set to your Quay.io username/repository
-  # └────────────────────────────────────────────────────────────────────────────
   IMAGE_NAME: ryannix123/nextcloud-openshift
+  BUILD_CONTEXT: ./nextcloud-simple-custom
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Determine which Nextcloud version to build
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Determine Nextcloud version
-        id: version
-        run: |
-          # Use manual input if provided
-          if [ -n "${{ inputs.nextcloud_version }}" ]; then
-            VERSION="${{ inputs.nextcloud_version }}"
-            echo "Using manually specified version: ${VERSION}"
-          else
-            # Fetch latest stable version from Nextcloud releases
-            echo "Fetching latest Nextcloud version..."
-            VERSION=$(curl -sL https://download.nextcloud.com/server/releases/ | \
-                      grep -oP 'nextcloud-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.bz2")' | \
-                      sort -V | tail -1)
-            
-            if [ -z "${VERSION}" ]; then
-              echo "::error::Failed to determine latest Nextcloud version"
-              exit 1
-            fi
-            echo "Latest stable version: ${VERSION}"
+    # ─────────────────────────────────────────────────────────────────────────
+    # Determine which Nextcloud version to build
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Determine Nextcloud version
+      id: version
+      run: |
+        # Use manual input if provided
+        if [ -n "${{ inputs.nextcloud_version }}" ]; then
+          VERSION="${{ inputs.nextcloud_version }}"
+          echo "Using manually specified version: ${VERSION}"
+        else
+          # Fetch latest stable version from Nextcloud releases
+          echo "Fetching latest Nextcloud version..."
+          VERSION=$(curl -sL https://download.nextcloud.com/server/releases/ | \
+                    grep -oP 'nextcloud-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.bz2")' | \
+                    sort -V | tail -1)
+          
+          if [ -z "${VERSION}" ]; then
+            echo "::error::Failed to determine latest Nextcloud version"
+            exit 1
           fi
-          
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "### 🏷️ Building Nextcloud ${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "Latest stable version: ${VERSION}"
+        fi
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Check if this version already exists in registry (skip if so)
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Check if image already exists
-        id: check
-        run: |
-          # Try to pull the manifest without downloading the image
-          if podman manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} > /dev/null 2>&1; then
-            echo "Image tag ${{ steps.version.outputs.version }} already exists"
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "Image tag ${{ steps.version.outputs.version }} not found, will build"
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "### 🏷️ Building Nextcloud ${VERSION}" >> $GITHUB_STEP_SUMMARY
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Build the container image
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Build with Podman
-        if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
-        run: |
-          echo "Building Nextcloud ${{ steps.version.outputs.version }}..."
-          
-          podman build \
-            --build-arg NEXTCLOUD_VERSION=${{ steps.version.outputs.version }} \
-            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
-            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            --file Containerfile \
-            .
-          
-          echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
-          echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+    # ─────────────────────────────────────────────────────────────────────────
+    # Check if this version already exists in registry (skip if so)
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Check if image already exists
+      id: check
+      run: |
+        # Try to pull the manifest without downloading the image
+        if podman manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} > /dev/null 2>&1; then
+          echo "Image tag ${{ steps.version.outputs.version }} already exists"
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "Image tag ${{ steps.version.outputs.version }} not found, will build"
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Push to Quay.io
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Log in to Quay.io
-        if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
-        run: |
-          podman login \
-            --username ${{ secrets.QUAY_USERNAME }} \
-            --password ${{ secrets.QUAY_PASSWORD }} \
-            ${{ env.REGISTRY }}
+    # ─────────────────────────────────────────────────────────────────────────
+    # Build the container image
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Build with Podman
+      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "Building Nextcloud ${{ steps.version.outputs.version }}..."
 
-      - name: Push to Quay.io
-        if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
-        run: |
-          echo "Pushing images to Quay.io..."
-          
-          podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-          podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          
-          echo "### 🚀 Push completed" >> $GITHUB_STEP_SUMMARY
-          echo "- Version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Latest tag: \`latest\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Registry: [quay.io/${{ env.IMAGE_NAME }}](https://${{ env.REGISTRY }}/repository/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
+        podman build \
+          --build-arg NEXTCLOUD_VERSION=${{ steps.version.outputs.version }} \
+          --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+          --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          --file ${{ env.BUILD_CONTEXT }}/Containerfile \
+          ${{ env.BUILD_CONTEXT }}
 
-      # ─────────────────────────────────────────────────────────────────────────
-      # Summary for skipped builds
-      # ─────────────────────────────────────────────────────────────────────────
-      - name: Skip summary
-        if: steps.check.outputs.exists == 'true' && github.event_name != 'workflow_dispatch'
-        run: |
-          echo "### ⏭️ Build skipped" >> $GITHUB_STEP_SUMMARY
-          echo "Image \`${{ steps.version.outputs.version }}\` already exists in registry." >> $GITHUB_STEP_SUMMARY
-          echo "Use manual workflow dispatch to force a rebuild." >> $GITHUB_STEP_SUMMARY
+        echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
+        echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Push to Quay.io
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Log in to Quay.io
+      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      run: |
+        podman login \
+          --username ${{ secrets.QUAY_USERNAME }} \
+          --password ${{ secrets.QUAY_PASSWORD }} \
+          ${{ env.REGISTRY }}
+
+    - name: Push to Quay.io
+      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "Pushing images to Quay.io..."
+
+        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+        echo "### 🚀 Push completed" >> $GITHUB_STEP_SUMMARY
+        echo "- Version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Latest tag: \`latest\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Registry: [quay.io/${{ env.IMAGE_NAME }}](https://${{ env.REGISTRY }}/repository/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Summary for skipped builds
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Skip summary
+      if: steps.check.outputs.exists == 'true' && github.event_name != 'workflow_dispatch'
+      run: |
+        echo "### ⏭️ Build skipped" >> $GITHUB_STEP_SUMMARY
+        echo "Image \`${{ steps.version.outputs.version }}\` already exists in registry." >> $GITHUB_STEP_SUMMARY
+        echo "Use manual workflow dispatch to force a rebuild." >> $GITHUB_STEP_SUMMARY
