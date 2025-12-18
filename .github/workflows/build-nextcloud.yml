@@ -27,7 +27,6 @@ on:
   # Auto-run weekly to pick up new releases
   schedule:
   - cron: '0 6 * * 1' # Every Monday at 6am UTC
-
   # Build on push to main when container-related files change
   push:
     branches: [ main ]
@@ -40,7 +39,7 @@ on:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: ryannix123/nextcloud-openshift
+  IMAGE_NAME: ryan_nix/nextcloud-openshift
   BUILD_CONTEXT: ./nextcloud-simple-custom
 
 jobs:
