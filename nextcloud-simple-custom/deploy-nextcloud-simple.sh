@@ -34,6 +34,71 @@ generate_password() {
     openssl rand -base64 20 | tr -dc 'a-zA-Z0-9' | head -c 20
 }
 
+post_deploy_config() {
+    local ROUTE_HOST="$1"
+    
+    log "Running post-deployment configuration..."
+    
+    # Wait a bit for Nextcloud to fully initialize
+    log "Waiting for Nextcloud to fully initialize (30s)..."
+    sleep 30
+    
+    # Get the pod name
+    POD=$(oc get pods -l app=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -z "$POD" ]; then
+        warn "Could not find Nextcloud pod, skipping post-deploy config"
+        return
+    fi
+    
+    log "Configuring Nextcloud on pod: $POD"
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Fix warnings
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    log "Removing lost+found from custom_apps (if exists)..."
+    oc exec "$POD" -- rm -rf /var/www/html/custom_apps/lost+found 2>/dev/null || true
+    
+    log "Adding missing database indices..."
+    oc exec "$POD" -- php /var/www/html/occ db:add-missing-indices -n 2>/dev/null || warn "Could not add indices (may already exist)"
+    
+    log "Running mimetype migrations..."
+    oc exec "$POD" -- php /var/www/html/occ maintenance:repair --include-expensive -n 2>/dev/null || warn "Mimetype repair had issues"
+    
+    log "Rescanning files for integrity..."
+    oc exec "$POD" -- php /var/www/html/occ integrity:check-core 2>/dev/null || true
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Install Nextcloud Office (Collabora)
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    log "Installing Nextcloud Office (richdocuments)..."
+    oc exec "$POD" -- php /var/www/html/occ app:install richdocuments 2>/dev/null || warn "richdocuments may already be installed"
+    
+    log "Installing Collabora CODE server (richdocumentscode)..."
+    oc exec "$POD" -- php /var/www/html/occ app:install richdocumentscode 2>/dev/null || warn "richdocumentscode may already be installed"
+    
+    # Enable the apps (in case they were disabled)
+    oc exec "$POD" -- php /var/www/html/occ app:enable richdocuments 2>/dev/null || true
+    oc exec "$POD" -- php /var/www/html/occ app:enable richdocumentscode 2>/dev/null || true
+    
+    log "Configuring WOPI URLs for Collabora..."
+    oc exec "$POD" -- php /var/www/html/occ config:app:set richdocuments wopi_url \
+        --value="https://${ROUTE_HOST}/custom_apps/richdocumentscode/proxy.php?req=" 2>/dev/null || warn "Could not set wopi_url"
+    
+    oc exec "$POD" -- php /var/www/html/occ config:app:set richdocuments public_wopi_url \
+        --value="https://${ROUTE_HOST}" 2>/dev/null || warn "Could not set public_wopi_url"
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Final verification
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    log "Verifying Nextcloud Office configuration..."
+    oc exec "$POD" -- php /var/www/html/occ richdocuments:activate-config 2>/dev/null || warn "Could not verify richdocuments config"
+    
+    log "Post-deployment configuration complete!"
+}
+
 deploy() {
     local IMAGE="$1"
     local ROUTE_HOST="$2"
@@ -391,6 +456,9 @@ EOF
     
     log "Waiting for Nextcloud to be ready..."
     oc wait --for=condition=available deployment/nextcloud --timeout=300s || warn "Nextcloud taking longer than expected"
+    
+    # Run post-deployment configuration
+    post_deploy_config "$ROUTE_HOST"
     
     echo ""
     log "========================================="
