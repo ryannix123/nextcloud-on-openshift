@@ -8,7 +8,7 @@ FROM quay.io/centos/centos:stream9
 
 LABEL maintainer="Ryan Nix" \
       description="Nextcloud for OpenShift with nginx + PHP-FPM" \
-      version="32.0"
+      version="32.0.3"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Install packages
@@ -50,7 +50,7 @@ RUN dnf -y install epel-release && \
 # ─────────────────────────────────────────────────────────────────────────────
 # Download and install Nextcloud
 # ─────────────────────────────────────────────────────────────────────────────
-ARG NEXTCLOUD_VERSION=32.0.2
+ARG NEXTCLOUD_VERSION=32.0.3
 ENV NEXTCLOUD_VERSION=${NEXTCLOUD_VERSION}
 
 RUN curl -fsSL https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2 -o /tmp/nextcloud.tar.bz2 && \
