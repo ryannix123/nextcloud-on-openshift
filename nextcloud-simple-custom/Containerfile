@@ -2,13 +2,14 @@
 # Nextcloud Container for OpenShift
 # Base: CentOS Stream 9 + Remi PHP 8.3 + nginx
 # Runs as non-root, OpenShift restricted SCC compatible
+# Auto-detects latest Nextcloud version if not specified
 # ═══════════════════════════════════════════════════════════════════════════════
 
 FROM quay.io/centos/centos:stream9
 
 LABEL maintainer="Ryan Nix" \
       description="Nextcloud for OpenShift with nginx + PHP-FPM" \
-      version="32.0.3"
+      version="latest"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Install packages
@@ -49,16 +50,33 @@ RUN dnf -y install epel-release && \
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Download and install Nextcloud
+# If NEXTCLOUD_VERSION is empty, auto-detect latest stable version
+# To pin a version: --build-arg NEXTCLOUD_VERSION=32.0.3
 # ─────────────────────────────────────────────────────────────────────────────
-ARG NEXTCLOUD_VERSION=32.0.3
-ENV NEXTCLOUD_VERSION=${NEXTCLOUD_VERSION}
+ARG NEXTCLOUD_VERSION=""
 
-RUN curl -fsSL https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2 -o /tmp/nextcloud.tar.bz2 && \
-    curl -fsSL https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2.sha256 -o /tmp/nextcloud.sha256 && \
-    cd /tmp && grep "nextcloud-${NEXTCLOUD_VERSION}.tar.bz2$" nextcloud.sha256 | sed "s|nextcloud-${NEXTCLOUD_VERSION}.tar.bz2|nextcloud.tar.bz2|" | sha256sum -c - && \
+RUN set -ex && \
+    if [ -z "$NEXTCLOUD_VERSION" ]; then \
+        echo "Auto-detecting latest Nextcloud version..." && \
+        NEXTCLOUD_VERSION=$(curl -sL https://download.nextcloud.com/server/releases/ | \
+            grep -oP 'nextcloud-[0-9]+\.[0-9]+\.[0-9]+\.tar\.bz2"' | \
+            sed 's/nextcloud-//;s/\.tar\.bz2"//' | \
+            sort -V | tail -1); \
+    fi && \
+    if [ -z "$NEXTCLOUD_VERSION" ]; then \
+        echo "ERROR: Could not detect Nextcloud version" && exit 1; \
+    fi && \
+    echo "========================================" && \
+    echo "Installing Nextcloud ${NEXTCLOUD_VERSION}" && \
+    echo "========================================" && \
+    curl -fsSL "https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2" -o /tmp/nextcloud.tar.bz2 && \
+    curl -fsSL "https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2.sha256" -o /tmp/nextcloud.sha256 && \
+    cd /tmp && \
+    echo "$(grep "nextcloud-${NEXTCLOUD_VERSION}.tar.bz2$" nextcloud.sha256 | cut -d' ' -f1)  nextcloud.tar.bz2" | sha256sum -c - && \
     mkdir -p /var/www/html && \
     tar -xjf /tmp/nextcloud.tar.bz2 -C /var/www/html --strip-components=1 && \
-    rm -f /tmp/nextcloud.tar.bz2 /tmp/nextcloud.sha256
+    rm -f /tmp/nextcloud.tar.bz2 /tmp/nextcloud.sha256 && \
+    echo "${NEXTCLOUD_VERSION}" > /var/www/html/.nextcloud-version
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configure nginx
