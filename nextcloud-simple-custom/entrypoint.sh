@@ -220,7 +220,34 @@ echo 'Apps paths configured successfully';
 # Set maintenance window (3 AM UTC)
 php /var/www/html/occ config:system:set maintenance_window_start --value=3 --type=integer
 
-# Configure Nextcloud Office (richdocuments) if installed
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-installation cleanup and optimization
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Remove lost+found directory (created by PVC filesystem formatting, not an app)
+if [ -d "/var/www/html/custom_apps/lost+found" ]; then
+    echo "Removing lost+found directory from custom_apps..."
+    rm -rf /var/www/html/custom_apps/lost+found
+fi
+
+# Add missing database indices for better performance
+echo "Adding missing database indices..."
+php /var/www/html/occ db:add-missing-indices || echo "Warning: Could not add missing indices"
+
+# Run mimetype migrations
+echo "Running mimetype migrations..."
+php /var/www/html/occ maintenance:repair --include-expensive || echo "Warning: Could not complete mimetype migrations"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Install and configure Nextcloud Office (richdocuments)
+# ─────────────────────────────────────────────────────────────────────────────
+if [ ! -d "/var/www/html/custom_apps/richdocuments" ]; then
+    echo "Installing Nextcloud Office (richdocuments)..."
+    php /var/www/html/occ app:install richdocuments || echo "Warning: Could not install richdocuments"
+    php /var/www/html/occ app:install richdocumentscode || echo "Warning: Could not install richdocumentscode"
+fi
+
+# Configure Nextcloud Office WOPI URLs
 if [ -d "/var/www/html/custom_apps/richdocuments" ]; then
     echo "Configuring Nextcloud Office..."
     # Get the first trusted domain for WOPI URLs

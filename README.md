@@ -72,17 +72,7 @@ podman push quay.io/YOUR_USERNAME/nextcloud-openshift:latest
 
 The script outputs your admin credentials at the end — save them!
 
-### 📝 Enable Document Editing
-
-After deployment completes, install Nextcloud Office:
-
-```bash
-# Install office apps
-oc exec deployment/nextcloud -- php /var/www/html/occ app:install richdocuments
-oc exec deployment/nextcloud -- php /var/www/html/occ app:install richdocumentscode
-```
-
-The WOPI URLs are automatically configured based on your trusted domain. You can now edit `.docx`, `.xlsx`, `.pptx`, `.odt`, and more directly in the browser!
+**Document editing is automatically enabled** — Nextcloud Office (Collabora) is installed and configured on first boot. You can start editing `.docx`, `.xlsx`, `.pptx`, `.odt`, and more right away!
 
 ### ⚠️ Collabora CODE Server Warnings
 
@@ -98,20 +88,13 @@ When running the built-in CODE server in OpenShift's restricted environment, you
 
 **For production deployments with many concurrent users**, consider deploying a dedicated Collabora Online server with its own pod and appropriate privileges for better performance.
 
-### 🧹 Post-Installation Cleanup (Optional)
+### 🧹 Automatic Post-Installation Optimization
 
-After deployment, you may see some warnings in the Nextcloud admin panel. These are cosmetic and don't affect functionality, but you can clear them with these commands:
+The entrypoint automatically handles common Nextcloud warnings on each startup:
 
-```bash
-# Add missing database indices (improves query performance)
-oc exec deployment/nextcloud -- php /var/www/html/occ db:add-missing-indices
-
-# Run mimetype migrations (may take a few minutes)
-oc exec deployment/nextcloud -- php /var/www/html/occ maintenance:repair --include-expensive
-
-# Remove lost+found directory (created by PVC filesystem formatting, not an app)
-oc exec deployment/nextcloud -- rm -rf /var/www/html/custom_apps/lost+found
-```
+- ✅ Removes `lost+found` directory from custom_apps (PVC filesystem artifact)
+- ✅ Adds missing database indices for better performance  
+- ✅ Runs mimetype migrations
 
 **Note:** The "AppAPI deploy daemon" warning can be safely ignored — it's for running containerized external apps which require Docker socket access that OpenShift doesn't allow.
 
