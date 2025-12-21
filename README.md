@@ -10,11 +10,12 @@
 
 ## 🆓 Red Hat Developer Sandbox
 
-The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox) is a **free** OpenShift environment perfect for testing Nextcloud. A few things to know:
+The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox) is a **free-test-drive** OpenShift environment perfect for testing Nextcloud. A few things to know:
 
 - **Free tier** — No credit card required
 - **Auto-hibernation** — Deployments scale to zero after 12 hours of inactivity
 - **Resource limits** — 7 GB RAM, 15 GB storage per project
+- **Testing only. Not for production!** - The Developer Sandbox lets people test the latest version of OpenShift.
 
 ### Waking Up Your Deployment
 
