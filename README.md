@@ -70,7 +70,7 @@ podman push quay.io/YOUR_USERNAME/nextcloud-openshift:latest
 # Deploy to OpenShift
 ./deploy-nextcloud-simple.sh deploy quay.io/YOUR_USERNAME/nextcloud-openshift:latest nextcloud.apps.your-cluster.com
 ```
-
+[![asciicast](https://asciinema.org/a/763698.svg)](https://asciinema.org/a/763698)
 The script outputs your admin credentials at the end — save them!
 
 **Document editing is automatically enabled** — Nextcloud Office (Collabora) is installed and configured on first boot. You can start editing `.docx`, `.xlsx`, `.pptx`, `.odt`, and more right away!
