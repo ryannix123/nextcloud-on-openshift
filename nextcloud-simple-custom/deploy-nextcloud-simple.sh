@@ -1,6 +1,7 @@
 #!/bin/bash
-# Simplified Nextcloud Deployment for OpenShift
-# Uses PVC storage instead of S3, single replica, no scaling
+# Nextcloud Deployment for OpenShift
+# Uses PVC storage, single replica deployment
+# For scaling, requires ReadWriteMany storage (not available in Developer Sandbox)
 set -e
 
 # Configuration
@@ -19,11 +20,11 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 usage() {
-    echo "Usage: $0 <image> [route-host] [namespace]"
+    echo "Usage: $0 <command> [options]"
     echo ""
     echo "Commands:"
     echo "  $0 deploy <image> <route-host>  - Deploy Nextcloud"
-    echo "  $0 cleanup                       - Remove all resources"
+    echo "  $0 cleanup                      - Remove all resources"
     echo ""
     echo "Example:"
     echo "  $0 deploy quay.io/ryan_nix/nextcloud-openshift:latest nextcloud.apps.example.com"
@@ -93,8 +94,19 @@ post_deploy_config() {
     # Final verification
     # ─────────────────────────────────────────────────────────────────────────
     
-    log "Verifying Nextcloud Office configuration..."
-    oc exec "$POD" -- php /var/www/html/occ richdocuments:activate-config 2>/dev/null || warn "Could not verify richdocuments config"
+    log "Nextcloud Office installed! CODE server may take 1-2 minutes to fully initialize."
+    log "Verifying Nextcloud Office configuration (may show timeout on first run - this is normal)..."
+    
+    # Give CODE server a moment to start
+    sleep 10
+    
+    if oc exec "$POD" -- php /var/www/html/occ richdocuments:activate-config 2>/dev/null; then
+        log "✓ Nextcloud Office verified and ready!"
+    else
+        warn "CODE server still initializing - this is normal on fresh installs."
+        warn "Document editing will be available in 1-2 minutes."
+        warn "You can verify later with: oc exec deployment/nextcloud -- php /var/www/html/occ richdocuments:activate-config"
+    fi
     
     log "Post-deployment configuration complete!"
 }
@@ -204,7 +216,7 @@ spec:
     spec:
       containers:
         - name: mariadb
-          image: registry.redhat.io/rhel9/mariadb-1011:latest
+          image: quay.io/fedora/mariadb-118
           ports:
             - containerPort: 3306
           env:
