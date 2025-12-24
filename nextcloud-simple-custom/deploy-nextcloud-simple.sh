@@ -293,7 +293,7 @@ spec:
     spec:
       containers:
         - name: redis
-          image: docker.io/redis:7-alpine
+          image: docker.io/redis:8-alpine
           command: ["redis-server", "--requirepass", "\$(REDIS_PASSWORD)", "--save", "", "--appendonly", "no", "--stop-writes-on-bgsave-error", "no"]
           ports:
             - containerPort: 6379
