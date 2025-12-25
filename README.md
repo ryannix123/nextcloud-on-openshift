@@ -10,12 +10,12 @@
 
 ## 🆓 Red Hat Developer Sandbox
 
-The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox) is a **free-test-drive** OpenShift environment perfect for testing Nextcloud. A few things to know:
+The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox) is a **free** OpenShift environment perfect for testing Nextcloud:
 
 - **Free tier** — No credit card required
+- **Generous resources** — 14 GB RAM, 40 GB storage, 3 CPU cores
+- **Latest OpenShift** — Always running a recent version (4.18+)
 - **Auto-hibernation** — Deployments scale to zero after 12 hours of inactivity
-- **Resource limits** — 7 GB RAM, 15 GB storage per project
-- **Testing only. Not for production!** - The Developer Sandbox lets people test the latest version of OpenShift.
 
 ### Waking Up Your Deployment
 
@@ -70,7 +70,7 @@ podman push quay.io/YOUR_USERNAME/nextcloud-openshift:latest
 # Deploy to OpenShift
 ./deploy-nextcloud-simple.sh deploy quay.io/YOUR_USERNAME/nextcloud-openshift:latest nextcloud.apps.your-cluster.com
 ```
-[![asciicast](https://asciinema.org/a/763698.svg)](https://asciinema.org/a/763698)
+
 The script outputs your admin credentials at the end — save them!
 
 **Document editing is automatically enabled** — Nextcloud Office (Collabora) is installed and configured on first boot. You can start editing `.docx`, `.xlsx`, `.pptx`, `.odt`, and more right away!
@@ -291,6 +291,43 @@ oc get pod -l app=nextcloud -o jsonpath='{.items[*].metadata.annotations.openshi
 # Verify non-root UID
 oc exec deployment/nextcloud -- id
 ```
+
+---
+
+## 🛡️ Securing Access with IP Whitelisting
+
+OpenShift makes it easy to restrict access to your Nextcloud instance by IP address using route annotations — no firewall rules or external load balancer configuration needed.
+
+### Allow Only Specific IPs
+
+```bash
+# Allow access only from your office and home IPs
+oc annotate route nextcloud \
+  haproxy.router.openshift.io/ip_whitelist="203.0.113.50 198.51.100.0/24"
+```
+
+### Common Use Cases
+
+| Scenario | Annotation Value |
+|----------|------------------|
+| Single IP | `203.0.113.50` |
+| Multiple IPs | `203.0.113.50 198.51.100.25` |
+| CIDR range | `10.0.0.0/8` |
+| Mixed | `203.0.113.50 192.168.1.0/24 10.0.0.0/8` |
+
+### Remove Restriction
+
+```bash
+oc annotate route nextcloud haproxy.router.openshift.io/ip_whitelist-
+```
+
+### Verify Configuration
+
+```bash
+oc get route nextcloud -o jsonpath='{.metadata.annotations.haproxy\.router\.openshift\.io/ip_whitelist}'
+```
+
+This is a great way to lock down a POC or demo instance to only your team's IPs without any infrastructure changes.
 
 ---
 
