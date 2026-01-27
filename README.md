@@ -1,9 +1,9 @@
-[![Build and Push Nextcloud](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml/badge.svg)](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml)
 # 🚀 Nextcloud on OpenShift — Zero Privilege Deployment
 
 [![OpenShift](https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift)](https://www.redhat.com/en/technologies/cloud-computing/openshift)
 [![Nextcloud](https://img.shields.io/badge/Nextcloud-32.x-blue?logo=nextcloud)](https://nextcloud.com)
 [![SCC](https://img.shields.io/badge/SCC-restricted-brightgreen)](https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html)
+[![Build and Push Nextcloud](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml/badge.svg)](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml)
 
 > **Deploy Nextcloud on OpenShift without ANY elevated privileges.** No `anyuid`. No `privileged`. Just pure, security-hardened container goodness designed for multi-tenancy.
 
