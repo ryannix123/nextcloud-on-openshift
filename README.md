@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://nextcloud.com/c/uploads/2025/10/Nextcloud_01-standard-logo.svg" alt="Nextcloud Logo" width="400">
-</p>
-
 <h1 align="center">Nextcloud on OpenShift — Zero Privilege Deployment</h1>
 
 <p align="center">
@@ -18,6 +14,10 @@
 <p align="center">
   <strong>Deploy Nextcloud on OpenShift without ANY elevated privileges.</strong><br>
   No <code>anyuid</code>. No <code>privileged</code>. Just pure, security-hardened container goodness designed for multi-tenancy.
+</p>
+
+<p align="center">
+  <img src="https://nextcloud.com/c/uploads/2025/10/Nextcloud_01-standard-logo.svg" alt="Nextcloud Logo" width="250">
 </p>
 
 ---
