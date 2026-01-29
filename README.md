@@ -1,15 +1,24 @@
-# 🚀 Nextcloud on OpenShift — Zero Privilege Deployment
+<p align="center">
+  <img src="https://nextcloud.com/c/uploads/2025/10/Nextcloud_01-standard-logo.svg" alt="Nextcloud Logo" width="400">
+</p>
 
-[![OpenShift](https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift)](https://www.redhat.com/en/technologies/cloud-computing/openshift)
-[![Nextcloud](https://img.shields.io/badge/Nextcloud-32.x-blue?logo=nextcloud)](https://nextcloud.com)
-[![SCC](https://img.shields.io/badge/SCC-restricted-brightgreen)](https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html)
-[![MariaDB](https://img.shields.io/badge/MariaDB-11-blue?logo=mariadb)](https://mariadb.org)
-[![PHP](https://img.shields.io/badge/PHP-8.x-777BB4?logo=php&logoColor=white)](https://www.php.net)
-[![CentOS](https://img.shields.io/badge/CentOS-Stream%209-purple?logo=centos&logoColor=white)](https://www.centos.org)
-[![Quay.io](https://img.shields.io/badge/Quay.io-Container-red?logo=redhat&logoColor=white)](https://quay.io)
-[![Build and Push Nextcloud](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml/badge.svg)](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml)
+<h1 align="center">Nextcloud on OpenShift — Zero Privilege Deployment</h1>
 
-> **Deploy Nextcloud on OpenShift without ANY elevated privileges.** No `anyuid`. No `privileged`. Just pure, security-hardened container goodness designed for multi-tenancy.
+<p align="center">
+  <a href="https://www.redhat.com/en/technologies/cloud-computing/openshift"><img src="https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift" alt="OpenShift"></a>
+  <a href="https://nextcloud.com"><img src="https://img.shields.io/badge/Nextcloud-32.x-blue?logo=nextcloud" alt="Nextcloud"></a>
+  <a href="https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html"><img src="https://img.shields.io/badge/SCC-restricted-brightgreen" alt="SCC"></a>
+  <a href="https://mariadb.org"><img src="https://img.shields.io/badge/MariaDB-11-blue?logo=mariadb" alt="MariaDB"></a>
+  <a href="https://www.php.net"><img src="https://img.shields.io/badge/PHP-8.x-777BB4?logo=php&logoColor=white" alt="PHP"></a>
+  <a href="https://www.centos.org"><img src="https://img.shields.io/badge/CentOS-Stream%209-purple?logo=centos&logoColor=white" alt="CentOS"></a>
+  <a href="https://quay.io"><img src="https://img.shields.io/badge/Quay.io-Container-red?logo=redhat&logoColor=white" alt="Quay.io"></a>
+  <a href="https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml"><img src="https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml/badge.svg" alt="Build and Push Nextcloud"></a>
+</p>
+
+<p align="center">
+  <strong>Deploy Nextcloud on OpenShift without ANY elevated privileges.</strong><br>
+  No <code>anyuid</code>. No <code>privileged</code>. Just pure, security-hardened container goodness designed for multi-tenancy.
+</p>
 
 ---
 
@@ -374,4 +383,6 @@ This is a great way to lock down a POC or demo instance to only your team's IPs 
 
 ---
 
-**⭐ If this saved you hours of debugging, consider giving it a star! ⭐**
+<p align="center">
+  <strong>⭐ If this saved you hours of debugging, consider giving it a star! ⭐</strong>
+</p>
