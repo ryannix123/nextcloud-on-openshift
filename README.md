@@ -1,24 +1,15 @@
-<h1 align="center">Nextcloud on OpenShift — Zero Privilege Deployment</h1>
+# 🚀 Nextcloud on OpenShift — Zero Privilege Deployment
 
-<p align="center">
-  <a href="https://www.redhat.com/en/technologies/cloud-computing/openshift"><img src="https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift" alt="OpenShift"></a>
-  <a href="https://nextcloud.com"><img src="https://img.shields.io/badge/Nextcloud-32.x-blue?logo=nextcloud" alt="Nextcloud"></a>
-  <a href="https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html"><img src="https://img.shields.io/badge/SCC-restricted-brightgreen" alt="SCC"></a>
-  <a href="https://mariadb.org"><img src="https://img.shields.io/badge/MariaDB-11-blue?logo=mariadb" alt="MariaDB"></a>
-  <a href="https://www.php.net"><img src="https://img.shields.io/badge/PHP-8.x-777BB4?logo=php&logoColor=white" alt="PHP"></a>
-  <a href="https://www.centos.org"><img src="https://img.shields.io/badge/CentOS-Stream%209-purple?logo=centos&logoColor=white" alt="CentOS"></a>
-  <a href="https://quay.io"><img src="https://img.shields.io/badge/Quay.io-Container-red?logo=redhat&logoColor=white" alt="Quay.io"></a>
-  <a href="https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml"><img src="https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml/badge.svg" alt="Build and Push Nextcloud"></a>
-</p>
+[![OpenShift](https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift)](https://www.redhat.com/en/technologies/cloud-computing/openshift)
+[![Nextcloud](https://img.shields.io/badge/Nextcloud-33.x-blue?logo=nextcloud)](https://nextcloud.com)
+[![SCC](https://img.shields.io/badge/SCC-restricted-brightgreen)](https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html)
+[![MariaDB](https://img.shields.io/badge/MariaDB-11.8-blue?logo=mariadb)](https://mariadb.org)
+[![PHP](https://img.shields.io/badge/PHP-8.5-777BB4?logo=php&logoColor=white)](https://www.php.net)
+[![CentOS](https://img.shields.io/badge/CentOS-Stream%2010-purple?logo=centos&logoColor=white)](https://www.centos.org)
+[![Quay.io](https://img.shields.io/badge/Quay.io-Container-red?logo=redhat&logoColor=white)](https://quay.io)
+[![Build and Push Nextcloud](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml/badge.svg)](https://github.com/ryannix123/nextcloud-on-openshift/actions/workflows/build-nextcloud.yml)
 
-<p align="center">
-  <strong>Deploy Nextcloud on OpenShift without ANY elevated privileges.</strong><br>
-  No <code>anyuid</code>. No <code>privileged</code>. Just pure, security-hardened container goodness designed for multi-tenancy.
-</p>
-
-<p align="center">
-  <img src="https://nextcloud.com/c/uploads/2025/10/Nextcloud_01-standard-logo.svg" alt="Nextcloud Logo" width="250">
-</p>
+> **Deploy Nextcloud on OpenShift without ANY elevated privileges.** No `anyuid`. No `privileged`. Just pure, security-hardened container goodness designed for multi-tenancy.
 
 ---
 
@@ -62,10 +53,10 @@ A purpose-built Nextcloud container optimized for OpenShift's restricted Securit
 
 ### ✨ Features
 
-- ✅ CentOS Stream 9 + PHP 8.3 + nginx
+- ✅ **CentOS Stream 10 + PHP 8.5 + nginx** — Latest stack
 - ✅ Runs as non-root (OpenShift restricted SCC compatible)
 - ✅ **Nextcloud Office (Collabora) document editing** — edit docs, spreadsheets, presentations in-browser
-- ✅ MariaDB + Redis for performance
+- ✅ MariaDB 11.8 + Redis 8 for performance
 - ✅ Persistent storage for data, config, and apps
 - ✅ Automatic WOPI configuration for document editing
 - ✅ Background cron jobs included
@@ -75,17 +66,37 @@ A purpose-built Nextcloud container optimized for OpenShift's restricted Securit
 ```bash
 # Clone the repository
 git clone https://github.com/ryannix123/nextcloud-on-openshift.git
-cd nextcloud-on-openshift/custom-container
+cd nextcloud-on-openshift/nextcloud-simple-custom
 
-# Build and push the container image
+# Deploy to OpenShift (auto-generates route from cluster domain)
+sh deploy.sh
+```
+
+That's it! The script:
+- Auto-detects your cluster's ingress domain
+- Generates a route hostname (`nextcloud-<namespace>.<cluster-domain>`)
+- Creates all resources (secrets, PVCs, deployments, services, route)
+- Configures Nextcloud Office (Collabora)
+- Outputs your admin credentials at the end — **save them!**
+
+### 📦 Using a Custom Image
+
+```bash
+# Build and push your own image
 podman build --platform linux/amd64 -t quay.io/YOUR_USERNAME/nextcloud-openshift:latest -f Containerfile .
 podman push quay.io/YOUR_USERNAME/nextcloud-openshift:latest
 
-# Deploy to OpenShift
-./deploy-nextcloud-simple.sh deploy quay.io/YOUR_USERNAME/nextcloud-openshift:latest nextcloud.apps.your-cluster.com
+# Deploy with your image
+NEXTCLOUD_IMAGE=quay.io/YOUR_USERNAME/nextcloud-openshift:latest sh deploy.sh
 ```
 
-The script outputs your admin credentials at the end — save them!
+### ⚙️ Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEXTCLOUD_IMAGE` | `quay.io/ryan_nix/nextcloud-openshift:latest` | Container image to deploy |
+| `ROUTE_HOST` | Auto-generated | Custom route hostname |
+| `NAMESPACE` | Current project | Target namespace |
 
 **Document editing is automatically enabled** — Nextcloud Office (Collabora) is installed and configured on first boot. You can start editing `.docx`, `.xlsx`, `.pptx`, `.odt`, and more right away!
 
@@ -129,8 +140,8 @@ The entrypoint automatically handles common Nextcloud warnings on each startup:
 │  └──────────────────────────┬───────────────────────────┘   │
 │                              │                               │
 │  ┌───────────┐  ┌───────────┴───┐  ┌───────────┐            │
-│  │  MariaDB  │  │  Redis Cache  │  │   PVCs    │            │
-│  │   :3306   │  │    :6379      │  │ Data/Cfg  │            │
+│  │ MariaDB   │  │  Redis Cache  │  │   PVCs    │            │
+│  │  11.8     │  │     8.x       │  │ Data/Cfg  │            │
 │  └───────────┘  └───────────────┘  └───────────┘            │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -139,15 +150,15 @@ The entrypoint automatically handles common Nextcloud warnings on each startup:
 
 | File | Description |
 |------|-------------|
-| `Containerfile` | Container build definition (CentOS Stream 9 + PHP 8.3) |
+| `Containerfile` | Container build definition (CentOS Stream 10 + PHP 8.5) |
 | `entrypoint.sh` | Startup script with auto-configuration |
 | `nginx.conf` | Web server configuration with .mjs MIME fix |
 | `supervisord.conf` | Process manager for nginx + PHP-FPM + cron |
-| `deploy-nextcloud-simple.sh` | OpenShift deployment script |
+| `deploy.sh` | OpenShift deployment script |
 
 ### ⚙️ Configuration
 
-#### Environment Variables
+#### Environment Variables (Runtime)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -155,7 +166,7 @@ The entrypoint automatically handles common Nextcloud warnings on each startup:
 | `NC_MYSQL_DATABASE` | nextcloud | Database name |
 | `NC_REDIS_HOST` | redis | Redis hostname |
 | `NEXTCLOUD_ADMIN_USER` | admin | Admin username |
-| `NEXTCLOUD_TRUSTED_DOMAINS` | (required) | Space-separated trusted domains |
+| `NEXTCLOUD_TRUSTED_DOMAINS` | (auto-configured) | Space-separated trusted domains |
 
 #### Persistent Volumes
 
@@ -188,10 +199,10 @@ oc exec deployment/nextcloud -- php /var/www/html/occ app:list
 oc exec deployment/nextcloud -- php /var/www/html/occ richdocuments:activate-config
 
 # Cleanup (keeps PVCs)
-./deploy-nextcloud-simple.sh cleanup
+sh deploy.sh cleanup
 
 # Full cleanup including data
-./deploy-nextcloud-simple.sh cleanup
+sh deploy.sh cleanup
 oc delete pvc mariadb-pvc nextcloud-data-pvc nextcloud-apps-pvc nextcloud-config-pvc
 ```
 
@@ -345,6 +356,19 @@ This is a great way to lock down a POC or demo instance to only your team's IPs 
 
 ---
 
+## 📊 Stack Summary
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| **Nextcloud** | 33.x | Auto-detected at build time |
+| **PHP** | 8.5 | From Remi repository |
+| **CentOS** | Stream 10 | Latest upstream RHEL |
+| **nginx** | System default | From CentOS repos |
+| **MariaDB** | 11.8 | `quay.io/fedora/mariadb-118` |
+| **Redis** | 8.x | `docker.io/redis:8-alpine` |
+
+---
+
 ## 🚀 Production Recommendations
 
 1. **External Database** — Use managed PostgreSQL/MariaDB for reliability
@@ -383,6 +407,4 @@ This is a great way to lock down a POC or demo instance to only your team's IPs 
 
 ---
 
-<p align="center">
-  <strong>⭐ If this saved you hours of debugging, consider giving it a star! ⭐</strong>
-</p>
+**⭐ If this saved you hours of debugging, consider giving it a star! ⭐**

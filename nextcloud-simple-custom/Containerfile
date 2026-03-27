@@ -1,23 +1,23 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # Nextcloud Container for OpenShift
-# Base: CentOS Stream 9 + Remi PHP 8.3 + nginx
+# Base: CentOS Stream 10 + Remi PHP 8.5 + nginx
 # Runs as non-root, OpenShift restricted SCC compatible
 # Auto-detects latest Nextcloud version if not specified
 # ═══════════════════════════════════════════════════════════════════════════════
 
-FROM quay.io/centos/centos:stream9
+FROM quay.io/centos/centos:stream10
 
-LABEL maintainer="Ryan Nix" \
+LABEL maintainer="Ryan Nix <ryan.nix@gmail.com>" \
       description="Nextcloud for OpenShift with nginx + PHP-FPM" \
       version="latest"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Install packages
 # ─────────────────────────────────────────────────────────────────────────────
-RUN dnf -y install epel-release && \
-    dnf -y install https://rpms.remirepo.net/enterprise/remi-release-9.rpm && \
+RUN dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm && \
+    dnf -y install https://rpms.remirepo.net/enterprise/remi-release-10.rpm && \
     dnf -y module reset php && \
-    dnf -y module enable php:remi-8.3 && \
+    dnf -y module enable php:remi-8.5 && \
     dnf -y install \
         nginx \
         php-fpm \
@@ -28,7 +28,7 @@ RUN dnf -y install epel-release && \
         php-pecl-apcu \
         php-mysqlnd \
         php-pgsql \
-        php-pecl-redis5 \
+        php-pecl-redis6 \
         php-opcache \
         php-zip \
         php-xml \
@@ -51,7 +51,7 @@ RUN dnf -y install epel-release && \
 # ─────────────────────────────────────────────────────────────────────────────
 # Download and install Nextcloud
 # If NEXTCLOUD_VERSION is empty, auto-detect latest stable version
-# To pin a version: --build-arg NEXTCLOUD_VERSION=32.0.3
+# To pin a version: --build-arg NEXTCLOUD_VERSION=33.0.0
 # ─────────────────────────────────────────────────────────────────────────────
 ARG NEXTCLOUD_VERSION=""
 

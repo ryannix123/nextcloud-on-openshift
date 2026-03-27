@@ -1,38 +1,49 @@
 #!/bin/bash
+# ═══════════════════════════════════════════════════════════════════════════════
 # Nextcloud Deployment for OpenShift
-# Uses PVC storage, single replica deployment
-# For scaling, requires ReadWriteMany storage (not available in Developer Sandbox)
+# Just run: sh deploy.sh
+# Auto-generates route hostname from cluster's ingress domain
+# ═══════════════════════════════════════════════════════════════════════════════
 set -e
 
 # Configuration
-IMAGE="${1:-quay.io/ryan_nix/nextcloud-openshift:latest}"
-ROUTE_HOST="${2:-}"
-NAMESPACE="${3:-$(oc project -q)}"
+IMAGE="${NEXTCLOUD_IMAGE:-quay.io/ryan_nix/nextcloud-openshift:latest}"
+NAMESPACE="${NAMESPACE:-$(oc project -q)}"
 
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 log() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-
-usage() {
-    echo "Usage: $0 <command> [options]"
-    echo ""
-    echo "Commands:"
-    echo "  $0 deploy <image> <route-host>  - Deploy Nextcloud"
-    echo "  $0 cleanup                      - Remove all resources"
-    echo ""
-    echo "Example:"
-    echo "  $0 deploy quay.io/ryan_nix/nextcloud-openshift:latest nextcloud.apps.example.com"
-    exit 1
-}
+info() { echo -e "${CYAN}[    ]${NC} $1"; }
 
 generate_password() {
     openssl rand -base64 20 | tr -dc 'a-zA-Z0-9' | head -c 20
+}
+
+get_cluster_domain() {
+    # Try to get the default ingress domain from the cluster
+    local domain=""
+    
+    # Method 1: Get from existing route (most reliable in Developer Sandbox)
+    domain=$(oc get routes -A -o jsonpath='{.items[0].spec.host}' 2>/dev/null | sed 's/^[^.]*\.//')
+    
+    # Method 2: Try ingress config (requires cluster-reader)
+    if [ -z "$domain" ]; then
+        domain=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null)
+    fi
+    
+    # Method 3: Parse from console URL
+    if [ -z "$domain" ]; then
+        domain=$(oc whoami --show-console 2>/dev/null | sed 's|https://console-openshift-console\.||')
+    fi
+    
+    echo "$domain"
 }
 
 post_deploy_config() {
@@ -40,11 +51,9 @@ post_deploy_config() {
     
     log "Running post-deployment configuration..."
     
-    # Wait a bit for Nextcloud to fully initialize
     log "Waiting for Nextcloud to fully initialize (30s)..."
     sleep 30
     
-    # Get the pod name
     POD=$(oc get pods -l app=nextcloud -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
     if [ -z "$POD" ]; then
         warn "Could not find Nextcloud pod, skipping post-deploy config"
@@ -53,74 +62,58 @@ post_deploy_config() {
     
     log "Configuring Nextcloud on pod: $POD"
     
-    # ─────────────────────────────────────────────────────────────────────────
-    # Fix warnings
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    log "Removing lost+found from custom_apps (if exists)..."
+    log "Removing lost+found from custom_apps..."
     oc exec "$POD" -- rm -rf /var/www/html/custom_apps/lost+found 2>/dev/null || true
     
     log "Adding missing database indices..."
-    oc exec "$POD" -- php /var/www/html/occ db:add-missing-indices -n 2>/dev/null || warn "Could not add indices (may already exist)"
+    oc exec "$POD" -- php /var/www/html/occ db:add-missing-indices -n 2>/dev/null || warn "Could not add indices"
     
     log "Running mimetype migrations..."
-    oc exec "$POD" -- php /var/www/html/occ maintenance:repair --include-expensive -n 2>/dev/null || warn "Mimetype repair had issues"
-    
-    log "Rescanning files for integrity..."
-    oc exec "$POD" -- php /var/www/html/occ integrity:check-core 2>/dev/null || true
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # Install Nextcloud Office (Collabora)
-    # ─────────────────────────────────────────────────────────────────────────
+    oc exec "$POD" -- php /var/www/html/occ maintenance:repair --include-expensive -n 2>/dev/null || warn "Repair had issues"
     
     log "Installing Nextcloud Office (richdocuments)..."
-    oc exec "$POD" -- php /var/www/html/occ app:install richdocuments 2>/dev/null || warn "richdocuments may already be installed"
-    
-    log "Installing Collabora CODE server (richdocumentscode)..."
-    oc exec "$POD" -- php /var/www/html/occ app:install richdocumentscode 2>/dev/null || warn "richdocumentscode may already be installed"
-    
-    # Enable the apps (in case they were disabled)
+    oc exec "$POD" -- php /var/www/html/occ app:install richdocuments 2>/dev/null || true
+    oc exec "$POD" -- php /var/www/html/occ app:install richdocumentscode 2>/dev/null || true
     oc exec "$POD" -- php /var/www/html/occ app:enable richdocuments 2>/dev/null || true
     oc exec "$POD" -- php /var/www/html/occ app:enable richdocumentscode 2>/dev/null || true
     
     log "Configuring WOPI URLs for Collabora..."
     oc exec "$POD" -- php /var/www/html/occ config:app:set richdocuments wopi_url \
-        --value="https://${ROUTE_HOST}/custom_apps/richdocumentscode/proxy.php?req=" 2>/dev/null || warn "Could not set wopi_url"
-    
+        --value="https://${ROUTE_HOST}/custom_apps/richdocumentscode/proxy.php?req=" 2>/dev/null || true
     oc exec "$POD" -- php /var/www/html/occ config:app:set richdocuments public_wopi_url \
-        --value="https://${ROUTE_HOST}" 2>/dev/null || warn "Could not set public_wopi_url"
+        --value="https://${ROUTE_HOST}" 2>/dev/null || true
     
-    # ─────────────────────────────────────────────────────────────────────────
-    # Final verification
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    log "Nextcloud Office installed! CODE server may take 1-2 minutes to fully initialize."
-    log "Verifying Nextcloud Office configuration (may show timeout on first run - this is normal)..."
-    
-    # Give CODE server a moment to start
     sleep 10
     
     if oc exec "$POD" -- php /var/www/html/occ richdocuments:activate-config 2>/dev/null; then
         log "✓ Nextcloud Office verified and ready!"
     else
-        warn "CODE server still initializing - this is normal on fresh installs."
-        warn "Document editing will be available in 1-2 minutes."
-        warn "You can verify later with: oc exec deployment/nextcloud -- php /var/www/html/occ richdocuments:activate-config"
+        warn "CODE server still initializing - document editing available in 1-2 minutes"
     fi
     
     log "Post-deployment configuration complete!"
 }
 
 deploy() {
-    local IMAGE="$1"
-    local ROUTE_HOST="$2"
+    log "═══════════════════════════════════════════════════════════════"
+    log "  Nextcloud on OpenShift - Automated Deployment"
+    log "═══════════════════════════════════════════════════════════════"
+    echo ""
     
-    [[ -z "$IMAGE" ]] && error "Image is required"
-    [[ -z "$ROUTE_HOST" ]] && error "Route host is required"
+    # Get cluster domain and generate route
+    log "Detecting cluster ingress domain..."
+    CLUSTER_DOMAIN=$(get_cluster_domain)
     
-    log "Deploying simplified Nextcloud to namespace: $NAMESPACE"
+    if [ -z "$CLUSTER_DOMAIN" ]; then
+        error "Could not detect cluster domain. Set ROUTE_HOST environment variable manually."
+    fi
+    
+    ROUTE_HOST="${ROUTE_HOST:-nextcloud-${NAMESPACE}.${CLUSTER_DOMAIN}}"
+    
+    log "Namespace: $NAMESPACE"
     log "Image: $IMAGE"
     log "Route: $ROUTE_HOST"
+    echo ""
     
     # Generate passwords
     MYSQL_ROOT_PW=$(generate_password)
@@ -130,7 +123,6 @@ deploy() {
     
     log "Creating secrets..."
     
-    # MariaDB Secret
     oc create secret generic mariadb-secret \
         --from-literal=root-password="$MYSQL_ROOT_PW" \
         --from-literal=database=nextcloud \
@@ -138,12 +130,10 @@ deploy() {
         --from-literal=password="$MYSQL_PW" \
         --dry-run=client -o yaml | oc apply -f -
     
-    # Redis Secret
     oc create secret generic redis-secret \
         --from-literal=password="$REDIS_PW" \
         --dry-run=client -o yaml | oc apply -f -
     
-    # Nextcloud Secret
     oc create secret generic nextcloud-secret \
         --from-literal=admin-user=admin \
         --from-literal=admin-password="$ADMIN_PW" \
@@ -194,7 +184,7 @@ spec:
       storage: 100Mi
 EOF
     
-    log "Deploying MariaDB..."
+    log "Deploying MariaDB 11.8..."
     
     cat <<EOF | oc apply -f -
 ---
@@ -273,7 +263,7 @@ spec:
       targetPort: 3306
 EOF
     
-    log "Deploying Redis..."
+    log "Deploying Redis 8..."
     
     cat <<EOF | oc apply -f -
 ---
@@ -353,7 +343,6 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            # Database
             - name: NC_MYSQL_HOST
               value: "mariadb"
             - name: NC_MYSQL_PORT
@@ -373,7 +362,6 @@ spec:
                 secretKeyRef:
                   name: mariadb-secret
                   key: password
-            # Redis
             - name: NC_REDIS_HOST
               value: "redis"
             - name: NC_REDIS_PORT
@@ -383,7 +371,6 @@ spec:
                 secretKeyRef:
                   name: redis-secret
                   key: password
-            # Admin
             - name: NEXTCLOUD_ADMIN_USER
               valueFrom:
                 secretKeyRef:
@@ -394,10 +381,8 @@ spec:
                 secretKeyRef:
                   name: nextcloud-secret
                   key: admin-password
-            # Trusted domains
             - name: NEXTCLOUD_TRUSTED_DOMAINS
               value: "${ROUTE_HOST} localhost"
-            # Disable S3
             - name: NC_S3_ENABLED
               value: "false"
           volumeMounts:
@@ -473,17 +458,17 @@ EOF
     post_deploy_config "$ROUTE_HOST"
     
     echo ""
-    log "========================================="
-    log "Deployment complete!"
-    log "========================================="
+    log "═══════════════════════════════════════════════════════════════"
+    log "  ✓ Deployment Complete!"
+    log "═══════════════════════════════════════════════════════════════"
     echo ""
-    echo "URL: https://${ROUTE_HOST}"
+    info "URL: https://${ROUTE_HOST}"
     echo ""
-    echo "Admin credentials:"
-    echo "  Username: admin"
-    echo "  Password: $ADMIN_PW"
+    info "Admin credentials:"
+    info "  Username: admin"
+    info "  Password: $ADMIN_PW"
     echo ""
-    echo "Save these credentials - they won't be shown again!"
+    warn "Save these credentials - they won't be shown again!"
     echo ""
 }
 
@@ -501,15 +486,31 @@ cleanup() {
     log "Cleanup complete!"
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main
+# ═══════════════════════════════════════════════════════════════════════════════
 case "${1:-}" in
-    deploy)
-        deploy "$2" "$3"
-        ;;
     cleanup)
         cleanup
         ;;
+    -h|--help|help)
+        echo "Nextcloud on OpenShift - Deployment Script"
+        echo ""
+        echo "Usage:"
+        echo "  sh deploy.sh           Deploy Nextcloud (auto-generates route)"
+        echo "  sh deploy.sh cleanup   Remove all resources"
+        echo ""
+        echo "Environment variables:"
+        echo "  NEXTCLOUD_IMAGE  Container image (default: quay.io/ryan_nix/nextcloud-openshift:latest)"
+        echo "  ROUTE_HOST       Custom route hostname (default: auto-generated)"
+        echo "  NAMESPACE        Target namespace (default: current project)"
+        echo ""
+        echo "Examples:"
+        echo "  sh deploy.sh"
+        echo "  ROUTE_HOST=nextcloud.example.com sh deploy.sh"
+        echo "  sh deploy.sh cleanup"
+        ;;
     *)
-        usage
+        deploy
         ;;
 esac
