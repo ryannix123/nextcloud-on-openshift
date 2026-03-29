@@ -1,4 +1,4 @@
-<h1 align="center">Nextcloud on OpenShift — Zero Privilege Deployment</h1>
+<h1 align="center">Nextcloud on OpenShift — A fast, complete, repeatable, zero root rivilege peployment</h1>
 
 <p align="center">
   <a href="https://www.redhat.com/en/technologies/cloud-computing/openshift"><img src="https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift" alt="OpenShift"></a>
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <strong>Deploy Nextcloud on OpenShift without ANY elevated privileges.</strong><br>
+  <strong>Deploy Nextcloud on OpenShift quickly without ANY elevated privileges.</strong><br>
   No <code>anyuid</code>. No <code>privileged</code>. Just pure, security-hardened container goodness designed for multi-tenancy.
 </p>
 
