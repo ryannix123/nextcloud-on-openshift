@@ -8,9 +8,12 @@
 #   QUAY_PASSWORD - Quay.io robot token
 #
 # Usage:
-#   - Manual: Actions → Build and Push Nextcloud → Run workflow
+#   - Manual:    Actions → Build and Push Nextcloud → Run workflow
 #   - Scheduled: Runs automatically every Monday at 6am UTC
-#   - On push: Builds when Containerfile or configs change on main branch
+#   - On push:   Builds when Containerfile or configs change on main branch
+#   - On tag:    Push a vX.Y.Z tag to build and publish a versioned release
+#                git tag -a v2.0.0 -m "CentOS Stream 10, PHP 8.5, Collabora fix"
+#                git push origin v2.0.0
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: Build and Push Nextcloud
@@ -24,18 +27,24 @@ on:
         required: false
         default: ''
 
-  # Auto-run weekly to pick up new releases
+  # Auto-run weekly to pick up new Nextcloud releases
   schedule:
-  - cron: '0 6 * * 1' # Every Monday at 6am UTC
+    - cron: '0 6 * * 1'  # Every Monday at 6am UTC
+
   # Build on push to main when container-related files change
   push:
     branches: [ main ]
     paths:
-    - 'nextcloud-simple-custom/Containerfile'
-    - 'nextcloud-simple-custom/nginx.conf'
-    - 'nextcloud-simple-custom/supervisord.conf'
-    - 'nextcloud-simple-custom/entrypoint.sh'
-    - '.github/workflows/build-nextcloud.yml'
+      - 'nextcloud-simple-custom/Containerfile'
+      - 'nextcloud-simple-custom/nginx.conf'
+      - 'nextcloud-simple-custom/supervisord.conf'
+      - 'nextcloud-simple-custom/entrypoint.sh'
+      - '.github/workflows/build-nextcloud.yml'
+
+    # Release tags — pushing vX.Y.Z triggers a build that also tags the image
+    # with the release version (e.g. quay.io/ryan_nix/nextcloud-openshift:v2.0.0)
+    tags:
+      - 'v*'
 
 env:
   REGISTRY: quay.io
@@ -56,17 +65,14 @@ jobs:
     - name: Determine Nextcloud version
       id: version
       run: |
-        # Use manual input if provided
         if [ -n "${{ inputs.nextcloud_version }}" ]; then
           VERSION="${{ inputs.nextcloud_version }}"
           echo "Using manually specified version: ${VERSION}"
         else
-          # Fetch latest stable version from Nextcloud releases
           echo "Fetching latest Nextcloud version..."
           VERSION=$(curl -sL https://download.nextcloud.com/server/releases/ | \
                     grep -oP 'nextcloud-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.bz2")' | \
                     sort -V | tail -1)
-          
           if [ -z "${VERSION}" ]; then
             echo "::error::Failed to determine latest Nextcloud version"
             exit 1
@@ -75,15 +81,25 @@ jobs:
         fi
 
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "### 🏷️ Building Nextcloud ${VERSION}" >> $GITHUB_STEP_SUMMARY
+
+        # If this is a release tag push, capture the tag (e.g. v2.0.0)
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          RELEASE_TAG="${{ github.ref_name }}"
+          echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "is_release=true" >> $GITHUB_OUTPUT
+          echo "### 🏷️ Release ${RELEASE_TAG} — Nextcloud ${VERSION}" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "is_release=false" >> $GITHUB_OUTPUT
+          echo "### 🏷️ Building Nextcloud ${VERSION}" >> $GITHUB_STEP_SUMMARY
+        fi
 
     # ─────────────────────────────────────────────────────────────────────────
     # Check if this version already exists in registry (skip if so)
+    # Always build on release tags and manual dispatch regardless
     # ─────────────────────────────────────────────────────────────────────────
     - name: Check if image already exists
       id: check
       run: |
-        # Try to pull the manifest without downloading the image
         if podman manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} > /dev/null 2>&1; then
           echo "Image tag ${{ steps.version.outputs.version }} already exists"
           echo "exists=true" >> $GITHUB_OUTPUT
@@ -96,26 +112,44 @@ jobs:
     # Build the container image
     # ─────────────────────────────────────────────────────────────────────────
     - name: Build with Podman
-      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      if: >
+        steps.check.outputs.exists == 'false' ||
+        github.event_name == 'workflow_dispatch' ||
+        steps.version.outputs.is_release == 'true'
       working-directory: ./nextcloud-simple-custom
       run: |
         echo "Building Nextcloud ${{ steps.version.outputs.version }}..."
 
+        # Always build the Nextcloud version tag and latest.
+        # On a release tag, also tag the image with the release version (e.g. v2.0.0).
+        TAGS="-t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+              -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+
+        if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+          TAGS="${TAGS} -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.release_tag }}"
+          echo "Release build — also tagging as ${{ steps.version.outputs.release_tag }}"
+        fi
+
         podman build \
           --build-arg NEXTCLOUD_VERSION=${{ steps.version.outputs.version }} \
-          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
-          -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+          $TAGS \
           -f Containerfile \
           .
 
         echo "### ✅ Build completed successfully" >> $GITHUB_STEP_SUMMARY
-        echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Nextcloud: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+          echo "- Release tag: \`${{ steps.version.outputs.release_tag }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
 
     # ─────────────────────────────────────────────────────────────────────────
     # Push to Quay.io
     # ─────────────────────────────────────────────────────────────────────────
     - name: Log in to Quay.io
-      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      if: >
+        steps.check.outputs.exists == 'false' ||
+        github.event_name == 'workflow_dispatch' ||
+        steps.version.outputs.is_release == 'true'
       run: |
         podman login \
           --username ${{ secrets.QUAY_USERNAME }} \
@@ -123,23 +157,68 @@ jobs:
           ${{ env.REGISTRY }}
 
     - name: Push to Quay.io
-      if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
+      if: >
+        steps.check.outputs.exists == 'false' ||
+        github.event_name == 'workflow_dispatch' ||
+        steps.version.outputs.is_release == 'true'
       run: |
         echo "Pushing images to Quay.io..."
 
         podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
         podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
+        if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+          podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.release_tag }}
+        fi
+
         echo "### 🚀 Push completed" >> $GITHUB_STEP_SUMMARY
-        echo "- Version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Nextcloud version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+          echo "- Release tag: \`${{ steps.version.outputs.release_tag }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
         echo "- Latest tag: \`latest\`" >> $GITHUB_STEP_SUMMARY
         echo "- Registry: [quay.io/${{ env.IMAGE_NAME }}](https://${{ env.REGISTRY }}/repository/${{ env.IMAGE_NAME }})" >> $GITHUB_STEP_SUMMARY
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Create GitHub Release with notes when triggered by a tag push
+    # ─────────────────────────────────────────────────────────────────────────
+    - name: Create GitHub Release
+      if: steps.version.outputs.is_release == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.release_tag }}
+        name: "${{ steps.version.outputs.release_tag }} — Nextcloud ${{ steps.version.outputs.version }}"
+        body: |
+          ## Nextcloud on OpenShift ${{ steps.version.outputs.release_tag }}
+
+          **Nextcloud version:** ${{ steps.version.outputs.version }}
+          **Base image:** CentOS Stream 10
+          **PHP:** 8.5 (Remi repository)
+          **Includes:** Collabora CODE (Nextcloud Office), MariaDB 11.8, Redis 8
+
+          ### Container Image
+          ```
+          quay.io/ryan_nix/nextcloud-openshift:${{ steps.version.outputs.release_tag }}
+          quay.io/ryan_nix/nextcloud-openshift:${{ steps.version.outputs.version }}
+          quay.io/ryan_nix/nextcloud-openshift:latest
+          ```
+
+          ### Deploy
+          ```bash
+          git clone https://github.com/ryannix123/nextcloud-on-openshift.git
+          cd nextcloud-on-openshift/nextcloud-simple-custom
+          sh deploy.sh
+          ```
+        generate_release_notes: true
 
     # ─────────────────────────────────────────────────────────────────────────
     # Summary for skipped builds
     # ─────────────────────────────────────────────────────────────────────────
     - name: Skip summary
-      if: steps.check.outputs.exists == 'true' && github.event_name != 'workflow_dispatch'
+      if: >
+        steps.check.outputs.exists == 'true' &&
+        github.event_name != 'workflow_dispatch' &&
+        steps.version.outputs.is_release != 'true'
       run: |
         echo "### ⏭️ Build skipped" >> $GITHUB_STEP_SUMMARY
         echo "Image \`${{ steps.version.outputs.version }}\` already exists in registry." >> $GITHUB_STEP_SUMMARY
