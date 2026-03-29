@@ -198,13 +198,61 @@ oc exec deployment/nextcloud -- php /var/www/html/occ app:list
 # Check Collabora configuration
 oc exec deployment/nextcloud -- php /var/www/html/occ richdocuments:activate-config
 
-# Cleanup (keeps PVCs)
+# Full cleanup including PVCs (prompts for confirmation)
 sh deploy.sh cleanup
 
-# Full cleanup including data
-sh deploy.sh cleanup
-oc delete pvc mariadb-pvc nextcloud-data-pvc nextcloud-apps-pvc nextcloud-config-pvc
+# Cleanup preserving PVCs — use this for image rebuilds/upgrades
+sh deploy.sh cleanup --keep-data
+
+# Sync MariaDB password to secret after a broken re-run
+sh deploy.sh fix-db-password
 ```
+
+---
+
+### 🔑 Secret Management
+
+All credentials are generated randomly at first deploy and stored as OpenShift Secrets. They are **never saved to disk or the manifests folder** — the base64 encoding used by Kubernetes Secrets is not encryption, so committing them to a repository would expose credentials in plaintext.
+
+#### Retrieve Credentials
+
+```bash
+# Admin password
+oc get secret nextcloud-secret -o jsonpath='{.data.admin-password}' | base64 -d && echo
+
+# MariaDB nextcloud user password
+oc get secret mariadb-secret -o jsonpath='{.data.password}' | base64 -d && echo
+
+# MariaDB root password
+oc get secret mariadb-secret -o jsonpath='{.data.root-password}' | base64 -d && echo
+
+# Redis password
+oc get secret redis-secret -o jsonpath='{.data.password}' | base64 -d && echo
+```
+
+#### How Secrets and Data Stay in Sync
+
+The MariaDB password in `config.php` (stored on the `nextcloud-config-pvc`) and the password in `mariadb-secret` must always match. The deploy script handles this automatically:
+
+- **Re-running `deploy.sh`** — existing secrets are preserved, never overwritten
+- **`cleanup` then `deploy.sh`** — PVCs are deleted along with secrets, so a fresh password is written to both MariaDB and `config.php` on the new install
+- **`cleanup --keep-data`** — PVCs are preserved; redeploy immediately so the same secrets are reused before the pod starts
+
+If a credential mismatch occurs (e.g., a secret was manually changed), fix it without redeploying:
+
+```bash
+sh deploy.sh fix-db-password
+```
+
+#### Production Secret Management
+
+For production use, replace generated secrets with an external secrets provider:
+
+| Tool | Use Case |
+|------|----------|
+| [External Secrets Operator](https://external-secrets.io/) | Pull from AWS Secrets Manager, Azure Key Vault, HashiCorp Vault |
+| [Sealed Secrets](https://sealed-secrets.netlify.app/) | Encrypt secrets for safe git storage |
+| [OpenShift Secrets Store CSI](https://docs.openshift.com/container-platform/latest/nodes/pods/nodes-pods-secrets-store.html) | Mount secrets from a vault as pod volumes |
 
 ### 🐛 Troubleshooting
 
