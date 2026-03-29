@@ -1,4 +1,4 @@
-<h1 align="center">Nextcloud on OpenShift — A fast, complete, repeatable, zero root rivilege peployment</h1>
+<h1 align="center">Nextcloud on OpenShift — A fast, complete, repeatable, zero root privilege deployment</h1>
 
 <p align="center">
   <a href="https://www.redhat.com/en/technologies/cloud-computing/openshift"><img src="https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift" alt="OpenShift"></a>
