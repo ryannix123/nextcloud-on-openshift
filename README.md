@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://www.redhat.com/en/technologies/cloud-computing/openshift"><img src="https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift" alt="OpenShift"></a>
-  <a href="https://nextcloud.com"><img src="https://img.shields.io/badge/Nextcloud-33.x-blue?logo=nextcloud" alt="Nextcloud"></a>
+  <a href="https://nextcloud.com"><img src="https://img.shields.io/badge/Nextcloud-34.x-blue?logo=nextcloud" alt="Nextcloud"></a>
   <a href="https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html"><img src="https://img.shields.io/badge/SCC-restricted-brightgreen" alt="SCC"></a>
   <a href="https://mariadb.org"><img src="https://img.shields.io/badge/MariaDB-11.8-blue?logo=mariadb" alt="MariaDB"></a>
   <a href="https://www.php.net"><img src="https://img.shields.io/badge/PHP-8.5-777BB4?logo=php&logoColor=white" alt="PHP"></a>
@@ -22,14 +22,43 @@
 
 ---
 
+## 🤔 Already self-host Nextcloud? Here's why OpenShift
+
+If you run Nextcloud with Docker Compose today, you can spin it up in five minutes — so why bother with a platform? Because most of the toil you do *by hand* to keep that compose stack healthy, secure, and reachable is built into OpenShift. Every row below is something you've probably already wrestled with:
+
+| What you do by hand with Docker Compose | What OpenShift does for you |
+|---|---|
+| Certbot + cron + a reverse proxy to get and renew TLS certs | **Routes** issue and auto-renew TLS — HTTPS with zero cert plumbing |
+| Run as `root` (or pin a UID) and hope nothing in the image minds | **Enforced non-root**: a random high UID is assigned and the image runs anyway |
+| `restart: unless-stopped` and hope it actually comes back | **Self-healing**: kill a pod and the platform reconciles it back automatically |
+| Edit the compose file, SSH to the host, `docker compose up -d` | **Declarative state**: describe what you want; the cluster converges to it (GitOps-ready) |
+| iptables / firewall rules to limit who can reach the instance | **One route annotation** for IP allow-listing (see below) |
+| Manage volumes, networks, and restart ordering yourself | **PVCs, services, and health probes** are first-class, declarative objects |
+
+None of this requires elevated privileges, and all of it runs on the **free** Red Hat Developer Sandbox. The point of this project isn't "a harder way to run Nextcloud" — it's *the manual work you already do, automated and hardened by the platform.*
+
+### The non-root part is the headline
+
+Most self-hosters have never run Nextcloud under an arbitrary user ID. This image does: whether OpenShift hands it UID `1000760000` or any other number from your namespace's range, the **same image** starts and serves — no `chown`, no `--user` flag, no root, no custom SCC. That portability is exactly what makes a container safe to run in a shared, multi-tenant cluster, and it's the single biggest thing that separates a platform-ready image from a typical compose image.
+
+---
+
 ## 🆓 Red Hat Developer Sandbox
 
 The [Red Hat Developer Sandbox](https://developers.redhat.com/developer-sandbox) is a **free** OpenShift environment perfect for testing Nextcloud:
 
-- **Free tier** — No credit card required
-- **Generous resources** — 14 GB RAM, 40 GB storage, 3 CPU cores
+- **Free tier** — No credit card required, no setup, no cluster to install
+- **Generous resources** — 3 CPU cores, 14 GB RAM, and 40 GB storage per user — plenty to run this entire stack
 - **Latest OpenShift** — Always running a recent version (4.18+)
 - **Auto-hibernation** — Deployments scale to zero after 12 hours of inactivity
+
+> 💡 **New to OpenShift?** The Sandbox is the fastest way to try the platform — you get a real, current OpenShift cluster in your browser in minutes, with zero install. This entire Nextcloud stack is designed to deploy there on the free tier. [Grab a free Sandbox](https://developers.redhat.com/developer-sandbox) and run `sh deploy.sh`.
+
+Confirm your own namespace's quota at any time:
+
+```bash
+oc describe resourcequota
+```
 
 ### Waking Up Your Deployment
 
@@ -111,7 +140,7 @@ NEXTCLOUD_IMAGE=quay.io/YOUR_USERNAME/nextcloud-openshift:latest sh deploy.sh
 
 ### ⚠️ Collabora CODE Server Warnings
 
-When running the built-in CODE server in OpenShift's restricted environment, you'll see these warnings in the Nextcloud Office admin settings:
+This deployment uses the **built-in CODE server** that ships with Nextcloud Office. It runs inside the Nextcloud pod, which keeps the whole stack self-contained and easy to deploy. Because it runs under OpenShift's restricted SCC, you'll see these warnings in the Nextcloud Office admin settings:
 
 | Warning | Cause | Impact |
 |---------|-------|--------|
@@ -121,7 +150,7 @@ When running the built-in CODE server in OpenShift's restricted environment, you
 
 **These warnings are expected and can be safely ignored** for demo, personal, or small team use. The built-in CODE server is designed for "home use or small groups" — document editing works fine despite these warnings.
 
-**For production deployments with many concurrent users**, consider deploying a dedicated Collabora Online server with its own pod and appropriate privileges for better performance.
+**For heavier, multi-user workloads**, the built-in server is the wrong tool: Collabora's chroot-jail isolation relies on Linux capabilities the restricted SCC won't grant. The supported answer is a **dedicated Collabora Online server** running with its own privileges — either on a cluster where you can grant `anyuid`, or in an OpenShift Virtualization VM where the jails run intact. That's beyond the scope of this self-contained POC, but it's the path to take when you outgrow the bundled server.
 
 ### 🧹 Automatic Post-Installation Optimization
 
@@ -378,7 +407,7 @@ oc exec deployment/nextcloud -- id
 
 ## 🛡️ Securing Access with IP Whitelisting
 
-OpenShift makes it easy to restrict access to your Nextcloud instance by IP address using route annotations — no firewall rules or external load balancer configuration needed.
+OpenShift makes it easy to restrict access to your Nextcloud instance by IP address using route annotations — no firewall rules or external load balancer configuration needed. (This is the same row from the comparison table up top, made concrete.)
 
 ### Allow Only Specific IPs
 
@@ -417,22 +446,25 @@ This is a great way to lock down a POC or demo instance to only your team's IPs 
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| **Nextcloud** | 33.x | Auto-detected at build time |
+| **Nextcloud** | 34.x | Auto-detected at build time |
 | **PHP** | 8.5 | From Remi repository |
 | **CentOS** | Stream 10 | Latest upstream RHEL |
 | **nginx** | System default | From CentOS repos |
 | **MariaDB** | 11.8 | `quay.io/fedora/mariadb-118` |
 | **Redis** | 8.x | `docker.io/redis:8-alpine` |
 
+> **Why MariaDB and not PostgreSQL?** Nextcloud officially supports both, and for a self-hosted or small-team instance there's no practical difference you'll notice. MariaDB was chosen here for its drop-in OpenShift-ready image and familiarity. If you prefer Postgres, Nextcloud runs equally well on it — swap the database deployment and point `config.php` at it.
+
 ---
 
 ## 🚀 Production Recommendations
 
-1. **External Database** — Use managed PostgreSQL/MariaDB for reliability
+1. **External Database** — Use a managed MariaDB or PostgreSQL for reliability
 2. **Object Storage** — Configure S3-compatible backend for scalability
 3. **Redis Cluster** — Enable Redis Sentinel for HA caching
 4. **Backup Strategy** — Implement OADP or Velero for disaster recovery
 5. **Resource Limits** — Tune CPU/memory based on user count
+6. **Dedicated Collabora** — Move document editing to a standalone Collabora server for multi-user performance
 
 ---
 
