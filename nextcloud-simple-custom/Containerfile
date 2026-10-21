@@ -3,6 +3,9 @@
 # Base: CentOS Stream 10 + Remi PHP 8.5 + nginx
 # Runs as non-root, OpenShift restricted SCC compatible
 # Auto-detects latest Nextcloud version if not specified
+#
+# Security: requires PHP >= 8.5.12 (PHP2Shell, CVE-2026-109618 / CVE-2026-109619).
+# The build fails if Remi serves an older PHP.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 FROM quay.io/centos/centos:stream10
@@ -10,6 +13,11 @@ FROM quay.io/centos/centos:stream10
 LABEL maintainer="Ryan Nix <ryan.nix@gmail.com>" \
       description="Nextcloud for OpenShift with nginx + PHP-FPM" \
       version="latest"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Make dnf tolerant of overloaded mirrors (EPEL/Remi under heavy load)
+# ─────────────────────────────────────────────────────────────────────────────
+RUN printf 'retries=10\ntimeout=60\nmax_parallel_downloads=3\n' >> /etc/dnf/dnf.conf
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Install packages
@@ -47,6 +55,15 @@ RUN dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.
         && \
     dnf clean all && \
     rm -rf /var/cache/dnf
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security guard: refuse to ship PHP without the PHP2Shell fixes
+# (CVE-2026-109618 / CVE-2026-109619, fixed in 8.5.12).
+# If this fails, Remi hasn't published the patched build for this architecture yet.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN php -r 'exit(version_compare(PHP_VERSION, "8.5.12", "<") ? 1 : 0);' \
+    || { echo "PHP $(php -r 'echo PHP_VERSION;') is unpatched (needs >= 8.5.12), wait for Remi"; exit 1; } \
+    && echo "✓ PHP $(php -r 'echo PHP_VERSION;') includes PHP2Shell fixes"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Download and install Nextcloud
