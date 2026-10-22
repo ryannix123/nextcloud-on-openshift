@@ -9,11 +9,24 @@
 #
 # Usage:
 #   - Manual:    Actions → Build and Push Nextcloud → Run workflow
-#   - Scheduled: Runs automatically every Monday at 6am UTC
-#   - On push:   Builds when Containerfile or configs change on main branch
+#                  gh workflow run "Build and Push Nextcloud" -R ryannix123/nextcloud-on-openshift
+#                Always builds. This is the button for "a CVE just dropped".
+#   - Daily:     6am UTC — builds only if a new Nextcloud release is out
+#   - Weekly:    Mondays — ALWAYS rebuilds, even if Nextcloud hasn't changed.
+#                The image's attack surface is mostly PHP, nginx and the CentOS
+#                base, and none of those bump the Nextcloud version when they
+#                ship a fix.
+#   - On push:   Always builds when Containerfile or configs change on main
 #   - On tag:    Push a vX.Y.Z tag to build and publish a versioned release
 #                git tag -a v2.0.0 -m "CentOS Stream 10, PHP 8.5, Collabora fix"
 #                git push origin v2.0.0
+#
+# Every build runs with --pull=always --no-cache, so dnf fetches current
+# packages instead of reusing a layer holding last month's PHP.
+#
+# Tags: <nextcloud-version>, <nextcloud-version>-<YYYYMMDD>, latest (+ release
+# tag). The dated tag is immutable, so a security rebuild never destroys the
+# previous image you might want to roll back to.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: Build and Push Nextcloud
@@ -27,9 +40,9 @@ on:
         required: false
         default: ''
 
-  # Auto-run weekly to pick up new Nextcloud releases
   schedule:
-    - cron: '0 6 * * 1'  # Every Monday at 6am UTC
+    - cron: '0 6 * * *'    # Daily at 6am UTC: build only on a new Nextcloud release
+    - cron: '30 7 * * 1'   # Weekly, Monday 7:30 UTC: forced rebuild for OS/PHP fixes
 
   # Build on push to main when container-related files change
   push:
@@ -83,6 +96,7 @@ jobs:
         fi
 
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
 
         # If this is a release tag push, capture the tag (e.g. v2.0.0)
         if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
@@ -96,35 +110,47 @@ jobs:
         fi
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Check if this version already exists in registry (skip if so)
-    # Always build on release tags and manual dispatch regardless
+    # Decide whether to build.
+    #
+    # Only the DAILY schedule may skip, and only when this Nextcloud version is
+    # already published. Everything else always builds -- including pushes,
+    # which previously skipped whenever the version tag existed, so a
+    # Containerfile or entrypoint fix never reached the registry.
     # ─────────────────────────────────────────────────────────────────────────
-    - name: Check if image already exists
+    - name: Decide whether to build
       id: check
       run: |
-        if podman manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} > /dev/null 2>&1; then
-          echo "Image tag ${{ steps.version.outputs.version }} already exists"
-          echo "exists=true" >> $GITHUB_OUTPUT
+        EVENT="${{ github.event_name }}"
+        SCHEDULE="${{ github.event.schedule }}"
+
+        if [ "$EVENT" = "schedule" ] && [ "$SCHEDULE" = "0 6 * * *" ]; then
+          if podman manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} > /dev/null 2>&1; then
+            echo "Image tag ${{ steps.version.outputs.version }} already exists — daily check skips"
+            echo "build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "New Nextcloud release ${{ steps.version.outputs.version }} — building"
+        elif [ "$EVENT" = "schedule" ]; then
+          echo "🛡️ Weekly security refresh — rebuilding from scratch"
+          echo "### 🛡️ Weekly security refresh" >> $GITHUB_STEP_SUMMARY
         else
-          echo "Image tag ${{ steps.version.outputs.version }} not found, will build"
-          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "🔨 Event '${EVENT}' — always building"
         fi
+        echo "build=true" >> $GITHUB_OUTPUT
 
     # ─────────────────────────────────────────────────────────────────────────
     # Build the container image
     # ─────────────────────────────────────────────────────────────────────────
     - name: Build with Podman
-      if: >
-        steps.check.outputs.exists == 'false' ||
-        github.event_name == 'workflow_dispatch' ||
-        steps.version.outputs.is_release == 'true'
+      if: steps.check.outputs.build == 'true'
       working-directory: ./nextcloud-simple-custom
       run: |
         echo "Building Nextcloud ${{ steps.version.outputs.version }}..."
 
-        # Always build the Nextcloud version tag and latest.
+        # Version tag, immutable dated tag, and latest.
         # On a release tag, also tag the image with the release version (e.g. v2.0.0).
         TAGS="-t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+              -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }} \
               -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
 
         if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
@@ -132,8 +158,13 @@ jobs:
           echo "Release build — also tagging as ${{ steps.version.outputs.release_tag }}"
         fi
 
+        # --pull=always: never build on a stale CentOS base.
+        # --no-cache: always re-run dnf so OS and PHP fixes actually land.
         podman build \
+          --pull=always \
+          --no-cache \
           --build-arg NEXTCLOUD_VERSION=${{ steps.version.outputs.version }} \
+          --label org.opencontainers.image.revision=${{ github.sha }} \
           $TAGS \
           -f Containerfile \
           .
@@ -144,14 +175,23 @@ jobs:
           echo "- Release tag: \`${{ steps.version.outputs.release_tag }}\`" >> $GITHUB_STEP_SUMMARY
         fi
 
+    # Report what PHP actually shipped. The Containerfile's guard already
+    # failed the build on an unpatched PHP; this makes the answer visible in
+    # the run summary without pulling anything.
+    - name: Report shipped PHP version
+      if: steps.check.outputs.build == 'true'
+      run: |
+        PHP_VER=$(podman run --rm --entrypoint php \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }} \
+          -r 'echo PHP_VERSION;')
+        echo "✓ Image ships PHP ${PHP_VER}"
+        echo "- PHP: \`${PHP_VER}\`" >> $GITHUB_STEP_SUMMARY
+
     # ─────────────────────────────────────────────────────────────────────────
     # Push to Quay.io
     # ─────────────────────────────────────────────────────────────────────────
     - name: Log in to Quay.io
-      if: >
-        steps.check.outputs.exists == 'false' ||
-        github.event_name == 'workflow_dispatch' ||
-        steps.version.outputs.is_release == 'true'
+      if: steps.check.outputs.build == 'true'
       run: |
         podman login \
           --username ${{ secrets.QUAY_USERNAME }} \
@@ -159,14 +199,12 @@ jobs:
           ${{ env.REGISTRY }}
 
     - name: Push to Quay.io
-      if: >
-        steps.check.outputs.exists == 'false' ||
-        github.event_name == 'workflow_dispatch' ||
-        steps.version.outputs.is_release == 'true'
+      if: steps.check.outputs.build == 'true'
       run: |
         echo "Pushing images to Quay.io..."
 
         podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}
         podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
         if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
@@ -175,6 +213,7 @@ jobs:
 
         echo "### 🚀 Push completed" >> $GITHUB_STEP_SUMMARY
         echo "- Nextcloud version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Dated tag: \`${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}\`" >> $GITHUB_STEP_SUMMARY
         if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
           echo "- Release tag: \`${{ steps.version.outputs.release_tag }}\`" >> $GITHUB_STEP_SUMMARY
         fi
@@ -217,11 +256,8 @@ jobs:
     # Summary for skipped builds
     # ─────────────────────────────────────────────────────────────────────────
     - name: Skip summary
-      if: >
-        steps.check.outputs.exists == 'true' &&
-        github.event_name != 'workflow_dispatch' &&
-        steps.version.outputs.is_release != 'true'
+      if: steps.check.outputs.build != 'true'
       run: |
         echo "### ⏭️ Build skipped" >> $GITHUB_STEP_SUMMARY
         echo "Image \`${{ steps.version.outputs.version }}\` already exists in registry." >> $GITHUB_STEP_SUMMARY
-        echo "Use manual workflow dispatch to force a rebuild." >> $GITHUB_STEP_SUMMARY
+        echo "The weekly refresh rebuilds it anyway; use manual dispatch to force one now." >> $GITHUB_STEP_SUMMARY

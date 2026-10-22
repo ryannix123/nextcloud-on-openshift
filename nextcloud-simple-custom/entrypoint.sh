@@ -241,10 +241,39 @@ php /var/www/html/occ maintenance:repair --include-expensive || echo "Warning: C
 # ─────────────────────────────────────────────────────────────────────────────
 # Install and configure Nextcloud Office (richdocuments)
 # ─────────────────────────────────────────────────────────────────────────────
-if [ ! -d "/var/www/html/custom_apps/richdocuments" ]; then
-    echo "Installing Nextcloud Office (richdocuments)..."
-    php /var/www/html/occ app:install richdocuments || echo "Warning: Could not install richdocuments"
-    php /var/www/html/occ app:install richdocumentscode || echo "Warning: Could not install richdocumentscode"
+#
+# Install on first boot, and UPDATE on every boot after that. These apps live
+# on the custom_apps PVC, not in the image, so rebuilding the image never
+# refreshes them -- whatever version was installed first would otherwise run
+# forever.
+#
+# CVE-2026-110447: the built-in CODE server (richdocumentscode) before 26.4.303
+# allows unauthenticated command execution through proxy.php while the CODE
+# server isn't running -- which in this container is every pod start. If the
+# installed version is still vulnerable after the update attempt, remove it
+# rather than serve it. Disabling is not enough; the advisory requires removal.
+CODE_APP=richdocumentscode
+[ "$(uname -m)" = "aarch64" ] && CODE_APP=richdocumentscode_arm64
+CODE_MIN_VERSION=26.4.303
+
+for app in richdocuments "$CODE_APP"; do
+    if [ -d "/var/www/html/custom_apps/$app" ]; then
+        echo "Updating $app..."
+        php /var/www/html/occ app:update "$app" || echo "Warning: Could not update $app"
+    else
+        echo "Installing $app..."
+        php /var/www/html/occ app:install "$app" || echo "Warning: Could not install $app"
+    fi
+done
+
+if [ -d "/var/www/html/custom_apps/$CODE_APP" ]; then
+    CODE_VER=$(php /var/www/html/occ config:app:get "$CODE_APP" installed_version 2>/dev/null || echo "0")
+    if php -r "exit(version_compare('${CODE_VER}', '${CODE_MIN_VERSION}', '<') ? 0 : 1);"; then
+        echo "SECURITY: $CODE_APP ${CODE_VER} is vulnerable to CVE-2026-110447 (needs >= ${CODE_MIN_VERSION}). Removing it."
+        php /var/www/html/occ app:remove "$CODE_APP" || rm -rf "/var/www/html/custom_apps/$CODE_APP"
+    else
+        echo "✓ $CODE_APP ${CODE_VER} is patched against CVE-2026-110447"
+    fi
 fi
 
 # Configure Nextcloud Office WOPI URLs
@@ -252,7 +281,7 @@ if [ -d "/var/www/html/custom_apps/richdocuments" ]; then
     echo "Configuring Nextcloud Office..."
     # Get the first trusted domain for WOPI URLs
     WOPI_HOST=$(echo "${NEXTCLOUD_TRUSTED_DOMAINS:-localhost}" | awk '{print $1}')
-    php /var/www/html/occ config:app:set richdocuments wopi_url --value="https://${WOPI_HOST}/custom_apps/richdocumentscode/proxy.php?req="
+    php /var/www/html/occ config:app:set richdocuments wopi_url --value="https://${WOPI_HOST}/custom_apps/${CODE_APP}/proxy.php?req="
     php /var/www/html/occ config:app:set richdocuments public_wopi_url --value="https://${WOPI_HOST}"
     echo "Nextcloud Office configured for ${WOPI_HOST}"
 fi
