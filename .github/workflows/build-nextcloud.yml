@@ -28,8 +28,8 @@
 # tag). The dated tag is immutable, so a security rebuild never destroys the
 # previous image you might want to roll back to.
 #
-# Retention: every tag except `latest` and release tags (vX.Y.Z) carries
-# quay.expires-after=QUAY_TAG_TTL, so Quay holds only two weeks of builds. A
+# Retention: every tag except `latest` and release tags (vX.Y.Z) points at a
+# copy of the image labeled quay.expires-after=QUAY_TAG_TTL, so Quay holds only two weeks of builds. A
 # version tag that is still current is re-pushed weekly and never lapses;
 # dated tags and retired versions expire. Expired tags sit in Quay's time
 # machine for 14 days before GC. Same scheme as worldmonitor-redhat.
@@ -68,8 +68,9 @@ on:
 env:
   REGISTRY: quay.io
   IMAGE_NAME: ryan_nix/nextcloud-openshift
-  # How long tags live on Quay. Read by Quay from the quay.expires-after
-  # annotation; `latest` and release tags are pushed without it.
+  # How long tags live on Quay. Quay reads the quay.expires-after LABEL of the
+  # image a tag points at (annotations on manifest lists are ignored).
+  # `latest` and release tags point at the unlabeled image and never expire.
   QUAY_TAG_TTL: 14d
   BUILD_CONTEXT: ./nextcloud-simple-custom
 
@@ -219,16 +220,19 @@ jobs:
           podman push ${DEST}:${{ steps.version.outputs.release_tag }}
         fi
 
-        # Expiring tags: each is a manifest list wrapping the image just pushed,
-        # annotated with quay.expires-after. The annotation lives on the index,
-        # not the image, so `latest` (which points at the image) never expires.
-        for TAG in ${{ steps.version.outputs.version }} ${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}; do
-          # The build gave the local image this name; free it for the list.
-          podman untag "${DEST}:latest" "${DEST}:${TAG}" 2>/dev/null || true
-          podman manifest create --annotation "quay.expires-after=${QUAY_TAG_TTL}" "${DEST}:${TAG}"
-          podman manifest add "${DEST}:${TAG}" "docker://${DEST}:latest"
-          podman manifest push --all "${DEST}:${TAG}" "docker://${DEST}:${TAG}"
-        done
+        # Expiring tags point at a copy of the image that differs only by the
+        # quay.expires-after label: same layers, new config, built in seconds.
+        # Quay expires a tag from the labels of the image it points at (it
+        # ignores manifest-list annotations), so `latest` keeps the unlabeled
+        # original and never expires.
+        CTX=$(mktemp -d)
+        printf 'FROM %s\nLABEL quay.expires-after=%s\n' "${DEST}:latest" "${QUAY_TAG_TTL}" > "${CTX}/Containerfile"
+        podman build --pull=never \
+          -t ${DEST}:${{ steps.version.outputs.version }} \
+          -t ${DEST}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }} \
+          "${CTX}"
+        podman push ${DEST}:${{ steps.version.outputs.version }}
+        podman push ${DEST}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}
 
         echo "### 🚀 Push completed" >> $GITHUB_STEP_SUMMARY
         echo "- Nextcloud version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
