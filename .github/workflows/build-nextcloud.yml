@@ -27,6 +27,12 @@
 # Tags: <nextcloud-version>, <nextcloud-version>-<YYYYMMDD>, latest (+ release
 # tag). The dated tag is immutable, so a security rebuild never destroys the
 # previous image you might want to roll back to.
+#
+# Retention: every tag except `latest` and release tags (vX.Y.Z) carries
+# quay.expires-after=QUAY_TAG_TTL, so Quay holds only two weeks of builds. A
+# version tag that is still current is re-pushed weekly and never lapses;
+# dated tags and retired versions expire. Expired tags sit in Quay's time
+# machine for 14 days before GC. Same scheme as worldmonitor-redhat.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: Build and Push Nextcloud
@@ -62,6 +68,9 @@ on:
 env:
   REGISTRY: quay.io
   IMAGE_NAME: ryan_nix/nextcloud-openshift
+  # How long tags live on Quay. Read by Quay from the quay.expires-after
+  # annotation; `latest` and release tags are pushed without it.
+  QUAY_TAG_TTL: 14d
   BUILD_CONTEXT: ./nextcloud-simple-custom
 
 jobs:
@@ -202,14 +211,24 @@ jobs:
       if: steps.check.outputs.build == 'true'
       run: |
         echo "Pushing images to Quay.io..."
+        DEST=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}
-        podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-
+        # Permanent tags: the image itself, no expiry.
+        podman push ${DEST}:latest
         if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
-          podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.release_tag }}
+          podman push ${DEST}:${{ steps.version.outputs.release_tag }}
         fi
+
+        # Expiring tags: each is a manifest list wrapping the image just pushed,
+        # annotated with quay.expires-after. The annotation lives on the index,
+        # not the image, so `latest` (which points at the image) never expires.
+        for TAG in ${{ steps.version.outputs.version }} ${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}; do
+          # The build gave the local image this name; free it for the list.
+          podman untag "${DEST}:latest" "${DEST}:${TAG}" 2>/dev/null || true
+          podman manifest create --annotation "quay.expires-after=${QUAY_TAG_TTL}" "${DEST}:${TAG}"
+          podman manifest add "${DEST}:${TAG}" "docker://${DEST}:latest"
+          podman manifest push --all "${DEST}:${TAG}" "docker://${DEST}:${TAG}"
+        done
 
         echo "### 🚀 Push completed" >> $GITHUB_STEP_SUMMARY
         echo "- Nextcloud version tag: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
